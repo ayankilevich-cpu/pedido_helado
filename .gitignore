@@ -1,0 +1,21 @@
+# Entornos virtuales
+.venv/
+venv/
+
+# Cache
+__pycache__/
+*.pyc
+
+# Archivos de ejemplo locales (no necesarios en el repo)
+*.xls
+Pedido_Generado.xlsx
+pedido_calculado.xlsx
+Ventas_Estimadas.xlsx
+Stock.xlsx
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
