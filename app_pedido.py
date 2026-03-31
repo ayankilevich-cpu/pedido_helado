@@ -191,28 +191,17 @@ if btn_calcular:
         ventas_empaq = cargar_mixventas(file_mix)
         ventas = pd.concat([ventas_granel, ventas_empaq], ignore_index=True)
 
-        st.info(
+        st.session_state["ventas_info"] = (
             f"Ventas cargadas: {len(ventas_granel)} sabores granel + "
             f"{len(ventas_empaq)} productos empaquetados"
         )
 
         stock_df = cargar_stock(file_stock)
-
         mapeo = generar_mapeo(ventas, stock_df)
         st.session_state["mapeo_df"] = mapeo
 
         sin_mapeo = mapeo[mapeo["descripcion_carrito"] == "SIN MAPEO"]
-        if not sin_mapeo.empty:
-            st.warning(
-                f"**{len(sin_mapeo)} productos sin mapeo** (no se incluirán en el pedido). "
-                f"Descargá el mapeo desde la barra lateral, corregilo y volvelo a cargar."
-            )
-            with st.expander("Ver productos sin mapeo"):
-                st.dataframe(
-                    sin_mapeo[["nombre_venta", "tipo"]],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        st.session_state["sin_mapeo_df"] = sin_mapeo
 
         pedido_df = calcular_pedido(
             ventas, mapeo, stock_df,
@@ -223,24 +212,105 @@ if btn_calcular:
     plantilla = _resolver_plantilla()
     cubicaje_dict, precio_dict = cargar_datos_plantilla(plantilla)
     pedido_df["cubicaje_unit"] = pedido_df["codigo_carrito"].map(cubicaje_dict).fillna(0)
-    pedido_df["cubicaje_total"] = pedido_df["pedido"] * pedido_df["cubicaje_unit"]
     pedido_df["precio_unit"] = pedido_df["codigo_carrito"].map(precio_dict).fillna(0)
+
+    st.session_state["pedido_base"] = pedido_df
+    st.session_state["pedido_params"] = {
+        "pct_stock_seg": pct_stock_seg,
+        "pct_ajuste_venta": pct_ajuste_venta,
+    }
+    st.session_state["calc_version"] = st.session_state.get("calc_version", 0) + 1
+
+# ── Resultados (persisten y se actualizan al editar) ─────────────────────────
+
+if "pedido_base" in st.session_state:
+    if "ventas_info" in st.session_state:
+        st.info(st.session_state["ventas_info"])
+
+    sin_mapeo = st.session_state.get("sin_mapeo_df", pd.DataFrame())
+    if not sin_mapeo.empty:
+        st.warning(
+            f"**{len(sin_mapeo)} productos sin mapeo** (no se incluirán en el pedido). "
+            f"Descargá el mapeo desde la barra lateral, corregilo y volvelo a cargar."
+        )
+        with st.expander("Ver productos sin mapeo"):
+            st.dataframe(
+                sin_mapeo[["nombre_venta", "tipo"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    pedido_df = st.session_state["pedido_base"].copy()
+    editor_key = f"pedido_editor_v{st.session_state.get('calc_version', 0)}"
+
+    # Apply pending edits from previous render so derived columns stay in sync
+    if editor_key in st.session_state:
+        for row_str, changes in st.session_state[editor_key].get("edited_rows", {}).items():
+            if "Pedido" in changes:
+                pedido_df.at[int(row_str), "pedido"] = changes["Pedido"]
+
+    pedido_df["cubicaje_total"] = pedido_df["pedido"] * pedido_df["cubicaje_unit"]
     pedido_df["precio_total"] = pedido_df["pedido"] * pedido_df["precio_unit"]
 
-    pedido_positivo = pedido_df[pedido_df["pedido"] > 0].copy()
+    st.session_state["pedido_base"]["pedido"] = pedido_df["pedido"].values
 
-    st.subheader(f"Pedido: {len(pedido_positivo)} productos a pedir")
+    # --- Header ---
+    n_pedir = int((pedido_df["pedido"] > 0).sum())
+    n_total = len(pedido_df)
+    params = st.session_state.get("pedido_params", {})
+
+    st.subheader(f"Pedido: {n_pedir} de {n_total} productos a pedir")
     captions = []
-    if pct_stock_seg < 100:
-        captions.append(f"Stock de seguridad al **{pct_stock_seg}%**")
-    if pct_ajuste_venta != 0:
-        captions.append(f"Venta ajustada **{pct_ajuste_venta:+.0f}%**")
+    if params.get("pct_stock_seg", 100) < 100:
+        captions.append(f"Stock de seguridad al **{params['pct_stock_seg']}%**")
+    if params.get("pct_ajuste_venta", 0) != 0:
+        captions.append(f"Venta ajustada **{params['pct_ajuste_venta']:+.0f}%**")
     if captions:
         st.caption(" · ".join(captions))
 
-    total_bultos = int(pedido_positivo["pedido"].sum())
-    total_cubicaje = pedido_positivo["cubicaje_total"].sum()
-    subtotal_sin_iva = pedido_positivo["precio_total"].sum()
+    # --- Tabla editable ---
+    COL_RENAME = {
+        "codigo_carrito": "Código",
+        "descripcion": "Descripción",
+        "grupo": "Grupo",
+        "venta": "Venta Sem.",
+        "stock_real": "Stock Real",
+        "stock_seg": "Stock Seg.",
+        "pedido": "Pedido",
+        "cubicaje_unit": "Cubicaje Unit.",
+        "cubicaje_total": "Cubicaje Ped.",
+        "precio_unit": "Precio Unit.",
+        "precio_total": "Precio Total",
+    }
+    display_df = pedido_df.rename(columns=COL_RENAME)
+
+    edited_display = st.data_editor(
+        display_df,
+        key=editor_key,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[c for c in display_df.columns if c != "Pedido"],
+        column_config={
+            "Venta Sem.": st.column_config.NumberColumn(format="%.1f"),
+            "Stock Real": st.column_config.NumberColumn(format="%.0f"),
+            "Stock Seg.": st.column_config.NumberColumn(format="%.0f"),
+            "Pedido": st.column_config.NumberColumn(format="%.0f", min_value=0),
+            "Cubicaje Unit.": st.column_config.NumberColumn(format="%.4f"),
+            "Cubicaje Ped.": st.column_config.NumberColumn(format="%.2f"),
+            "Precio Unit.": st.column_config.NumberColumn(format="$ %.0f"),
+            "Precio Total": st.column_config.NumberColumn(format="$ %.0f"),
+        },
+    )
+
+    # --- Métricas recalculadas desde los valores editados ---
+    edited_pedido = edited_display["Pedido"].fillna(0)
+    cub_unit = pedido_df["cubicaje_unit"].values
+    pre_unit = pedido_df["precio_unit"].values
+
+    mask_pos = edited_pedido > 0
+    total_bultos = int(edited_pedido[mask_pos].sum())
+    total_cubicaje = float((edited_pedido[mask_pos].values * cub_unit[mask_pos.values]).sum())
+    subtotal_sin_iva = float((edited_pedido[mask_pos].values * pre_unit[mask_pos.values]).sum())
     total_con_iva = subtotal_sin_iva * 1.21
 
     m1, m2, m3, m4 = st.columns(4)
@@ -249,38 +319,12 @@ if btn_calcular:
     m3.metric("Subtotal (sin IVA)", f"$ {subtotal_sin_iva:,.0f}")
     m4.metric("Total (con IVA 21%)", f"$ {total_con_iva:,.0f}")
 
-    col_fmt = {
-        "codigo_carrito": "Código",
-        "descripcion": "Descripción",
-        "grupo": "Grupo",
-        "venta": "Venta Sem.",
-        "stock_real": "Stock Real",
-        "stock_seg": "Stock Seg.",
-        "pedido": "Pedido",
-        "cubicaje_unit": "Cubicaje",
-        "cubicaje_total": "Cubicaje Ped.",
-        "precio_unit": "Precio Unit.",
-        "precio_total": "Precio Total",
-    }
-    display_df = pedido_positivo.rename(columns=col_fmt)
+    # --- Descarga con valores editados ---
+    pedido_export = pedido_df.copy()
+    pedido_export["pedido"] = edited_pedido.values
 
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Venta Sem.": st.column_config.NumberColumn(format="%.1f"),
-            "Stock Real": st.column_config.NumberColumn(format="%.0f"),
-            "Stock Seg.": st.column_config.NumberColumn(format="%.0f"),
-            "Pedido": st.column_config.NumberColumn(format="%.0f"),
-            "Cubicaje": st.column_config.NumberColumn(format="%.2f"),
-            "Cubicaje Ped.": st.column_config.NumberColumn(format="%.2f"),
-            "Precio Unit.": st.column_config.NumberColumn(format="%.0f"),
-            "Precio Total": st.column_config.NumberColumn(format="%.0f"),
-        },
-    )
-
-    excel_buffer = escribir_carrito(plantilla, pedido_df)
+    plantilla = _resolver_plantilla()
+    excel_buffer = escribir_carrito(plantilla, pedido_export)
 
     st.download_button(
         label="Descargar Carrito Excel",
