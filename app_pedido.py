@@ -330,13 +330,15 @@ if "pedido_base" in st.session_state:
     is_granel = pedido_df["grupo"].isin(GRUPOS_GRANEL)
     cajas_granel = int(edited_pedido[is_granel.values].sum())
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Total Bultos", f"{total_bultos:,}")
-    m2.metric("Cajas Granel", f"{cajas_granel:,}")
-    m3.metric("Kilos Totales", f"{total_kilos:,.1f} kg")
-    m4.metric("Cubicaje Total", f"{total_cubicaje:,.2f}")
-    m5.metric("Subtotal (sin IVA)", f"$ {subtotal_sin_iva:,.0f}")
-    m6.metric("Total (con IVA 21%)", f"$ {total_con_iva:,.0f}")
+    r1c1, r1c2, r1c3 = st.columns(3)
+    r1c1.metric("Total Bultos", f"{total_bultos:,}")
+    r1c2.metric("Cajas Granel", f"{cajas_granel:,}")
+    r1c3.metric("Kilos Totales", f"{total_kilos:,.1f} kg")
+
+    r2c1, r2c2, r2c3 = st.columns(3)
+    r2c1.metric("Cubicaje Total", f"{total_cubicaje:,.2f}")
+    r2c2.metric("Subtotal (sin IVA)", f"$ {subtotal_sin_iva:,.0f}")
+    r2c3.metric("Total (con IVA 21%)", f"$ {total_con_iva:,.0f}")
 
     # --- Descarga con valores editados ---
     pedido_export = pedido_df.copy()
