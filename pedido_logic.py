@@ -457,21 +457,25 @@ def obtener_plantilla() -> Path | None:
     return p if p.exists() else None
 
 
-def cargar_datos_plantilla(template_path: str | Path) -> tuple[dict[str, float], dict[str, float]]:
+def cargar_datos_plantilla(
+    template_path: str | Path,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """
-    Extrae cubicaje (col F) y precio (col I) de la plantilla del carrito.
-    Retorna ({codigo: cubicaje}, {codigo: precio}).
+    Extrae cubicaje (col F), peso (col G) y precio (col I) de la plantilla.
+    Retorna ({codigo: cubicaje}, {codigo: precio}, {codigo: peso_kg}).
     """
     wb = load_workbook(template_path, read_only=True, data_only=True)
     ws = wb.active
-    cubicaje = {}
-    precios = {}
+    cubicaje: dict[str, float] = {}
+    precios: dict[str, float] = {}
+    pesos: dict[str, float] = {}
     for row_idx in range(2, ws.max_row + 1):
         codigo_cell = ws.cell(row=row_idx, column=2).value
         if codigo_cell is None:
             continue
         codigo = str(codigo_cell).strip()
         cub = ws.cell(row=row_idx, column=6).value
+        peso = ws.cell(row=row_idx, column=7).value
         pre = ws.cell(row=row_idx, column=9).value
         try:
             cubicaje[codigo] = float(cub)
@@ -481,13 +485,17 @@ def cargar_datos_plantilla(template_path: str | Path) -> tuple[dict[str, float],
             precios[codigo] = float(pre)
         except (TypeError, ValueError):
             precios[codigo] = 0.0
+        try:
+            pesos[codigo] = float(peso)
+        except (TypeError, ValueError):
+            pesos[codigo] = 0.0
     wb.close()
-    return cubicaje, precios
+    return cubicaje, precios, pesos
 
 
 def cargar_cubicaje(template_path: str | Path) -> dict[str, float]:
     """Extrae el cubicaje (columna F) de la plantilla del carrito. Retorna {codigo: cubicaje}."""
-    cubicaje, _ = cargar_datos_plantilla(template_path)
+    cubicaje, _, _ = cargar_datos_plantilla(template_path)
     return cubicaje
 
 

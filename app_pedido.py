@@ -25,6 +25,7 @@ from pedido_logic import (
     obtener_plantilla,
     _guardar_plantilla,
     MAPEO_PATH,
+    GRUPOS_GRANEL,
 )
 
 st.set_page_config(page_title="Pedido Semanal Grido", page_icon="🍦", layout="wide")
@@ -210,9 +211,10 @@ if btn_calcular:
         )
 
     plantilla = _resolver_plantilla()
-    cubicaje_dict, precio_dict = cargar_datos_plantilla(plantilla)
+    cubicaje_dict, precio_dict, peso_dict = cargar_datos_plantilla(plantilla)
     pedido_df["cubicaje_unit"] = pedido_df["codigo_carrito"].map(cubicaje_dict).fillna(0)
     pedido_df["precio_unit"] = pedido_df["codigo_carrito"].map(precio_dict).fillna(0)
+    pedido_df["peso_unit"] = pedido_df["codigo_carrito"].map(peso_dict).fillna(0)
 
     st.session_state["pedido_base"] = pedido_df
     st.session_state["pedido_params"] = {
@@ -306,18 +308,25 @@ if "pedido_base" in st.session_state:
     edited_pedido = edited_display["Pedido"].fillna(0)
     cub_unit = pedido_df["cubicaje_unit"].values
     pre_unit = pedido_df["precio_unit"].values
+    peso_unit = pedido_df["peso_unit"].values
 
     mask_pos = edited_pedido > 0
     total_bultos = int(edited_pedido[mask_pos].sum())
     total_cubicaje = float((edited_pedido[mask_pos].values * cub_unit[mask_pos.values]).sum())
     subtotal_sin_iva = float((edited_pedido[mask_pos].values * pre_unit[mask_pos.values]).sum())
     total_con_iva = subtotal_sin_iva * 1.21
+    total_kilos = float((edited_pedido.values * peso_unit).sum())
 
-    m1, m2, m3, m4 = st.columns(4)
+    is_granel = pedido_df["grupo"].isin(GRUPOS_GRANEL)
+    cajas_granel = int(edited_pedido[is_granel.values].sum())
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total Bultos", f"{total_bultos:,}")
-    m2.metric("Cubicaje Total", f"{total_cubicaje:,.2f}")
-    m3.metric("Subtotal (sin IVA)", f"$ {subtotal_sin_iva:,.0f}")
-    m4.metric("Total (con IVA 21%)", f"$ {total_con_iva:,.0f}")
+    m2.metric("Cajas Granel", f"{cajas_granel:,}")
+    m3.metric("Kilos Totales", f"{total_kilos:,.1f} kg")
+    m4.metric("Cubicaje Total", f"{total_cubicaje:,.2f}")
+    m5.metric("Subtotal (sin IVA)", f"$ {subtotal_sin_iva:,.0f}")
+    m6.metric("Total (con IVA 21%)", f"$ {total_con_iva:,.0f}")
 
     # --- Descarga con valores editados ---
     pedido_export = pedido_df.copy()
