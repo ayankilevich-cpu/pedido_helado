@@ -34,7 +34,12 @@ def cargar_cajas_terminadas(file) -> pd.DataFrame:
 
 
 def cargar_mixventas(file) -> pd.DataFrame:
-    """Lee el .xls de mixventas; filtra productos con bultos > 0 y subgrupo == 1."""
+    """Lee el .xls de mixventas; filtra productos con bultos > 0 y subgrupo == 1.
+
+    Productos granel vendidos a mayoristas (ej. baldes 7,8 kg) se detectan
+    automáticamente por patrón en el nombre y se etiquetan como "granel"
+    con el nombre en MAYÚSCULAS para coincidir con cajas terminadas.
+    """
     df = pd.read_excel(file, engine="xlrd")
     mask = (df["subgrupo"] == 1) & (df["bultos"].notna()) & (df["bultos"] > 0)
     resultado = (
@@ -42,7 +47,16 @@ def cargar_mixventas(file) -> pd.DataFrame:
         .rename(columns={"artdescrip": "nombre_venta", "bultos": "venta"})
         .copy()
     )
+
+    _GRANEL_RE = r"\(7[,.]8"
+    is_granel = resultado["nombre_venta"].str.contains(
+        _GRANEL_RE, case=False, na=False
+    )
     resultado["tipo"] = "empaquetado"
+    resultado.loc[is_granel, "tipo"] = "granel"
+    resultado.loc[is_granel, "nombre_venta"] = (
+        resultado.loc[is_granel, "nombre_venta"].str.upper()
+    )
     return resultado
 
 
@@ -167,9 +181,6 @@ _OVERRIDE_EMPAQUETADO = {
     "Torta Grido Rellena": "4000446",
     "Torta Cookies And Cream": "4000835",
     "Torta Frutillas Con Crema": "4000892",
-    "Limon Al Agua (7,8kg)": "4000036",
-    "Chocolate (7,8kg)": "4000043",
-    "Crema Americana (7,8kg)": "4000045",
     "Frambuesas Doble Chocolate X120": "6002434",
     "Frutillas Doble Chocolate X120": "6002435",
 }
