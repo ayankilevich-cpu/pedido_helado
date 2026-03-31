@@ -354,8 +354,7 @@ def calcular_pedido(
 
     Lógica:
     - venta_ajustada = venta * (1 + pct_ajuste_venta/100)
-    - Si stock_real == 0: pedido = ceil(venta_ajustada * 1.5)
-    - Si stock_real > 0:  pedido = max(0, ceil(venta_ajustada + stock_seg * pct/100 - stock_real))
+    - pedido = max(0, ceil(venta_ajustada + stock_seg * pct_stock_seg/100 - stock_real))
 
     Retorna DataFrame con: codigo, descripcion, grupo, venta, stock_real, stock_seg, pedido
     (venta = venta ajustada usada en el cálculo)
@@ -417,8 +416,6 @@ def calcular_pedido(
     factor = pct_stock_seg / 100
 
     def _calc_pedido(row):
-        if row["stock_real"] == 0:
-            return math.ceil(row["venta"] * 1.5)
         return max(0, math.ceil(row["venta"] + row["stock_seg"] * factor - row["stock_real"]))
 
     pedido_df["pedido"] = pedido_df.apply(_calc_pedido, axis=1)
