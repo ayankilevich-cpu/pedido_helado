@@ -245,6 +245,16 @@ if "pedido_base" in st.session_state:
     pedido_df = st.session_state["pedido_base"].copy()
     editor_key = f"pedido_editor_v{st.session_state.get('calc_version', 0)}"
 
+    # Backfill peso_unit for sessions initiated before this column existed
+    if "peso_unit" not in pedido_df.columns:
+        plantilla = _resolver_plantilla()
+        if plantilla:
+            _, _, peso_dict = cargar_datos_plantilla(plantilla)
+            pedido_df["peso_unit"] = pedido_df["codigo_carrito"].map(peso_dict).fillna(0)
+        else:
+            pedido_df["peso_unit"] = 0.0
+        st.session_state["pedido_base"] = pedido_df
+
     # Apply pending edits from previous render so derived columns stay in sync
     if editor_key in st.session_state:
         for row_str, changes in st.session_state[editor_key].get("edited_rows", {}).items():
