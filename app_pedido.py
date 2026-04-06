@@ -160,10 +160,12 @@ if not plantilla_ok:
 col_pct1, col_pct2, col_btn = st.columns([1, 1, 2])
 
 with col_pct1:
-    pct_stock_seg = st.select_slider(
+    pct_stock_seg = st.slider(
         "% Stock de Seguridad",
-        options=[0, 25, 50, 75, 100],
+        min_value=0,
+        max_value=100,
         value=100,
+        step=1,
         help="Porcentaje del stock de seguridad a considerar en el cálculo del pedido",
     )
 
