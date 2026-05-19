@@ -699,33 +699,26 @@ def cargar_datos_plantilla(
     """
     Extrae cubicaje (col F), peso (col G) y precio (col I) de la plantilla.
     Retorna ({codigo: cubicaje}, {codigo: precio}, {codigo: peso_kg}).
+
+    Usa pandas para ser rápido (openpyxl en modo read_only iterando celdas tarda
+    decenas de segundos en plantillas con cientos de filas y muchas columnas;
+    pd.read_excel resuelve en ~1s gracias a la lectura vectorizada).
     """
-    wb = load_workbook(template_path, read_only=True, data_only=True)
-    ws = wb.active
-    cubicaje: dict[str, float] = {}
-    precios: dict[str, float] = {}
-    pesos: dict[str, float] = {}
-    for row_idx in range(2, ws.max_row + 1):
-        codigo_cell = ws.cell(row=row_idx, column=2).value
-        if codigo_cell is None:
-            continue
-        codigo = str(codigo_cell).strip()
-        cub = ws.cell(row=row_idx, column=6).value
-        peso = ws.cell(row=row_idx, column=7).value
-        pre = ws.cell(row=row_idx, column=9).value
-        try:
-            cubicaje[codigo] = float(cub)
-        except (TypeError, ValueError):
-            cubicaje[codigo] = 0.0
-        try:
-            precios[codigo] = float(pre)
-        except (TypeError, ValueError):
-            precios[codigo] = 0.0
-        try:
-            pesos[codigo] = float(peso)
-        except (TypeError, ValueError):
-            pesos[codigo] = 0.0
-    wb.close()
+    df = pd.read_excel(
+        template_path,
+        engine="openpyxl",
+        usecols=[1, 5, 6, 8],  # B=Codigo, F=Cubicaje, G=Peso, I=precio (0-indexed)
+        header=0,
+        dtype={1: str},
+    )
+    df.columns = ["codigo", "cubicaje", "peso", "precio"]
+    df = df.dropna(subset=["codigo"])
+    df["codigo"] = df["codigo"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    for c in ("cubicaje", "peso", "precio"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    cubicaje = dict(zip(df["codigo"], df["cubicaje"].astype(float)))
+    pesos = dict(zip(df["codigo"], df["peso"].astype(float)))
+    precios = dict(zip(df["codigo"], df["precio"].astype(float)))
     return cubicaje, precios, pesos
 
 
