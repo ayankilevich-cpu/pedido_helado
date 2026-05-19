@@ -6,6 +6,8 @@ Flujo: ventas (cajas terminadas + mixventas) + stock → pedido → carrito Exce
 
 import math
 import os
+import re
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from rapidfuzz import fuzz, process
 
 DATA_DIR = Path(__file__).parent / "data"
 MAPEO_PATH = Path(__file__).parent / "mapeo_productos.csv"
+PLAN_PATH = DATA_DIR / "compras_semanales_actual.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +342,144 @@ def cargar_mapeo(mapeo_path: Path | str = MAPEO_PATH) -> pd.DataFrame | None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Cálculo del pedido
+# 4. Planificación semanal (compras planificadas por semana)
+# ---------------------------------------------------------------------------
+
+# Códigos de ajuste devueltos en la columna `ajuste_plan` del pedido
+AJUSTE_NINGUNO = ""
+AJUSTE_SUBE = "up"          # cálculo < 97% del plan → se sube al mínimo
+AJUSTE_BAJA = "down"        # cálculo > 105% del plan → se baja al máximo
+AJUSTE_PLAN_CERO = "zero"   # producto en plan con valor 0
+AJUSTE_SIN_PLAN = "missing" # producto sin entrada en el plan
+
+_MESES_ES = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+    "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+_RE_SEMANA = re.compile(r"^Semana_(\d+)_([A-Za-zñÑáéíóúÁÉÍÓÚ]+)_(\d{4})$")
+
+
+def cargar_planificacion(file) -> pd.DataFrame:
+    """Lee el CSV de planificación semanal de compras.
+
+    Espera columnas: codigo_homologado, descripcion, linea_producto, categoria,
+    Semana_<n>_<Mes>_<Año>... y total_temporada.
+
+    Normaliza codigo_homologado a string sin sufijos `.0` ni espacios.
+    """
+    if hasattr(file, "seek"):
+        try:
+            file.seek(0)
+        except OSError:
+            pass
+    df = pd.read_csv(file, dtype={"codigo_homologado": str})
+    df["codigo_homologado"] = (
+        df["codigo_homologado"]
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+    )
+    return df
+
+
+def _guardar_planificacion(file, dest: Path | str = PLAN_PATH) -> bytes | None:
+    """Guarda copia local del CSV de planificación. Devuelve los bytes."""
+    dest = Path(dest)
+    if hasattr(file, "read"):
+        if hasattr(file, "seek"):
+            try:
+                file.seek(0)
+            except OSError:
+                pass
+        contenido = file.read()
+        if hasattr(file, "seek"):
+            try:
+                file.seek(0)
+            except OSError:
+                pass
+    else:
+        contenido = Path(file).read_bytes()
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(contenido)
+    except OSError:
+        pass
+    return contenido
+
+
+def obtener_planificacion() -> Path | None:
+    """Retorna la ruta de la última planificación guardada, si existe."""
+    return PLAN_PATH if PLAN_PATH.exists() else None
+
+
+def _parsear_semana(col: str) -> tuple[int, int, int] | None:
+    """De `Semana_18_Mayo_2026` → (año, semana, mes_hint). Retorna None si no matchea."""
+    m = _RE_SEMANA.match(col)
+    if not m:
+        return None
+    semana = int(m.group(1))
+    mes_nombre = m.group(2).lower()
+    año = int(m.group(3))
+    mes = _MESES_ES.get(mes_nombre, 0)
+    return año, semana, mes
+
+
+def _primer_domingo_del_año(año: int) -> date:
+    """Primer domingo del año (1/1 si cae domingo, si no el siguiente domingo)."""
+    d = date(año, 1, 1)
+    return d + timedelta(days=(6 - d.weekday()) % 7)
+
+
+def inicio_semana(año: int, semana: int) -> date:
+    """
+    Domingo de inicio de la `Semana N / Año`.
+    Convención del CSV: las semanas van domingo→sábado y la numeración se reinicia
+    cada año en la Sem 1 = primer domingo del año.
+    """
+    return _primer_domingo_del_año(año) + timedelta(days=(semana - 1) * 7)
+
+
+def fin_semana(año: int, semana: int) -> date:
+    """Sábado de cierre de la `Semana N / Año`."""
+    return inicio_semana(año, semana) + timedelta(days=6)
+
+
+def obtener_semanas(plan_df: pd.DataFrame) -> list[tuple[str, date]]:
+    """Devuelve [(nombre_columna, fecha_inicio_domingo)] de las columnas semanales del CSV."""
+    out: list[tuple[str, date]] = []
+    for col in plan_df.columns:
+        parsed = _parsear_semana(col)
+        if parsed is None:
+            continue
+        año, semana, _ = parsed
+        try:
+            fecha = inicio_semana(año, semana)
+        except ValueError:
+            continue
+        out.append((col, fecha))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def semana_default(plan_df: pd.DataFrame, hoy: date | None = None) -> str | None:
+    """Columna semanal cuyo rango [domingo, sábado] contiene `hoy`. Si hoy queda fuera del CSV, la más cercana."""
+    semanas = obtener_semanas(plan_df)
+    if not semanas:
+        return None
+    hoy = hoy or date.today()
+    for col, inicio in semanas:
+        if inicio <= hoy <= inicio + timedelta(days=6):
+            return col
+    if hoy < semanas[0][1]:
+        return semanas[0][0]
+    return semanas[-1][0]
+
+
+# ---------------------------------------------------------------------------
+# 5. Cálculo del pedido
 # ---------------------------------------------------------------------------
 
 def calcular_pedido(
@@ -348,16 +488,31 @@ def calcular_pedido(
     stock_df: pd.DataFrame,
     pct_stock_seg: int = 100,
     pct_ajuste_venta: float = 0,
+    plan_df: pd.DataFrame | None = None,
+    plan_col: str | None = None,
+    pct_plan_min: float = 3.0,
+    pct_plan_max: float = 5.0,
 ) -> pd.DataFrame:
     """
     Calcula el pedido de reposición por producto.
 
-    Lógica:
+    Lógica base:
     - venta_ajustada = venta * (1 + pct_ajuste_venta/100)
-    - pedido = max(0, ceil(venta_ajustada + stock_seg * pct_stock_seg/100 - stock_real))
+    - pedido_calc = max(0, ceil(venta_ajustada + stock_seg * pct_stock_seg/100 - stock_real))
 
-    Retorna DataFrame con: codigo, descripcion, grupo, venta, stock_real, stock_seg, pedido
-    (venta = venta ajustada usada en el cálculo)
+    Ajuste por planificación semanal (si `plan_df` y `plan_col` se proveen):
+    - lim_min = ceil(plan * (1 - pct_plan_min/100))
+    - lim_max = floor(plan * (1 + pct_plan_max/100))
+    - Si plan > 0:
+        pedido = clip(pedido_calc, lim_min, lim_max)
+    - Si plan == 0 o el producto no está en el plan:
+        pedido = 0 y se marca para revisión manual.
+
+    Retorna DataFrame con columnas:
+        codigo_carrito, descripcion, grupo, venta, stock_real, stock_seg,
+        plan_sem, pedido_calc, ajuste_plan, pedido
+    Las tres columnas relacionadas con el plan estarán siempre presentes:
+    si no hay plan cargado, plan_sem=NaN, pedido_calc=pedido, ajuste_plan="".
     """
     mapeo_valido = mapeo[
         (mapeo["codigo_carrito"].notna())
@@ -418,18 +573,102 @@ def calcular_pedido(
     def _calc_pedido(row):
         return max(0, math.ceil(row["venta"] + row["stock_seg"] * factor - row["stock_real"]))
 
-    pedido_df["pedido"] = pedido_df.apply(_calc_pedido, axis=1)
+    pedido_df["pedido_calc"] = pedido_df.apply(_calc_pedido, axis=1).astype(int)
+
+    # Ajuste por planificación semanal
+    aplicar_plan = plan_df is not None and plan_col is not None and plan_col in plan_df.columns
+    if aplicar_plan:
+        plan_lookup = plan_df.set_index("codigo_homologado")[plan_col]
+        pedido_df["plan_sem"] = (
+            pedido_df["codigo_carrito"].map(plan_lookup).astype(float)
+        )
+
+        def _ajustar(row):
+            calc = int(row["pedido_calc"])
+            plan = row["plan_sem"]
+            if pd.isna(plan):
+                return pd.Series({"pedido": 0, "ajuste_plan": AJUSTE_SIN_PLAN})
+            plan_num = float(plan)
+            if plan_num <= 0:
+                return pd.Series({"pedido": 0, "ajuste_plan": AJUSTE_PLAN_CERO})
+            lim_min = math.ceil(plan_num * (1 - pct_plan_min / 100))
+            lim_max = math.floor(plan_num * (1 + pct_plan_max / 100))
+            if lim_max < lim_min:
+                lim_max = lim_min
+            if calc < lim_min:
+                return pd.Series({"pedido": int(lim_min), "ajuste_plan": AJUSTE_SUBE})
+            if calc > lim_max:
+                return pd.Series({"pedido": int(lim_max), "ajuste_plan": AJUSTE_BAJA})
+            return pd.Series({"pedido": calc, "ajuste_plan": AJUSTE_NINGUNO})
+
+        ajustado = pedido_df.apply(_ajustar, axis=1)
+        pedido_df["pedido"] = ajustado["pedido"].astype(int)
+        pedido_df["ajuste_plan"] = ajustado["ajuste_plan"].astype(str)
+    else:
+        pedido_df["plan_sem"] = pd.NA
+        pedido_df["pedido"] = pedido_df["pedido_calc"].astype(int)
+        pedido_df["ajuste_plan"] = AJUSTE_NINGUNO
+
+    pedido_df["pedido_inicial"] = pedido_df["pedido"].astype(int)
 
     cols = [
         "codigo_carrito", "descripcion", "grupo",
-        "venta", "stock_real", "stock_seg", "pedido",
+        "venta", "stock_real", "stock_seg",
+        "plan_sem", "pedido_calc", "ajuste_plan",
+        "pedido_inicial", "pedido",
     ]
     return pedido_df[cols].sort_values("grupo").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
-# 5. Escritura del carrito Excel
+# 6. Escritura del carrito Excel
 # ---------------------------------------------------------------------------
+
+def validar_plantilla_carrito(contenido: bytes) -> tuple[bool, str]:
+    """
+    Comprueba que el Excel sea un Modelo de Carrito usable (hoja tipo export Grido).
+    Retorna (ok, mensaje_error). Si ok, mensaje_error es "".
+    """
+    if not contenido or len(contenido) < 100:
+        return False, "El archivo está vacío o es demasiado pequeño."
+
+    try:
+        bio = BytesIO(contenido)
+        wb = load_workbook(bio, read_only=True, data_only=True)
+    except Exception as e:
+        return False, f"No es un Excel válido (.xlsx): {e}"
+
+    ok = True
+    msg = ""
+    try:
+        ws = wb.active
+        if ws.max_row < 2:
+            ok, msg = False, "El Excel no tiene filas de datos (solo encabezado o vacío)."
+        else:
+            # Cabecera esperada del export: Codigo en col B, precio en col I (fila 1)
+            h_b = ws.cell(row=1, column=2).value
+            h_i = ws.cell(row=1, column=9).value
+            cod_ok = h_b is not None and "codigo" in str(h_b).lower()
+            pre_ok = h_i is not None and "precio" in str(h_i).lower()
+            if not (cod_ok and pre_ok):
+                ok, msg = (
+                    False,
+                    "No coincide con la plantilla del Modelo de Carrito: en la fila 1 "
+                    "deben aparecer columnas tipo «Codigo» (B) y «precio» (I). "
+                    "¿Subiste el archivo de Stock por error? Ese va en «Stock», no aquí.",
+                )
+            else:
+                c2 = ws.cell(row=2, column=2).value
+                if c2 is None or not str(c2).strip():
+                    ok, msg = False, "No hay código de producto en la fila 2 (columna B)."
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+    return ok, msg
+
 
 def _guardar_plantilla(file, dest: Path | str = DATA_DIR / "carrito_template.xlsx") -> bytes | None:
     """Guarda una copia de la plantilla del carrito. Retorna los bytes para session_state."""
