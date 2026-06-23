@@ -364,7 +364,7 @@ def _resolver_plan() -> pd.DataFrame | None:
 plan_df = _resolver_plan()
 plan_semanas = obtener_semanas(plan_df) if plan_df is not None else []
 
-col_pct1, col_pct2, col_sem, col_btn = st.columns([1, 1, 1.4, 1.3])
+col_pct1, col_pct2, col_sem, col_toggle, col_btn = st.columns([1, 1, 1.4, 0.9, 1.1])
 
 with col_pct1:
     pct_stock_seg = st.slider(
@@ -411,6 +411,19 @@ with col_sem:
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("Sin planificación cargada")
 
+with col_toggle:
+    st.markdown("<br>", unsafe_allow_html=True)
+    modo_replicar_venta = st.toggle(
+        "📋 Replicar venta",
+        value=False,
+        help=(
+            "**Modo Replicar Venta:** el pedido iguala exactamente la venta de la semana "
+            "(más el ajuste % si está activo). "
+            "Ignora stock real, stock de seguridad y planificación. "
+            "Útil para semanas donde querés reponer exactamente lo que vendiste."
+        ),
+    )
+
 with col_btn:
     st.markdown("<br>", unsafe_allow_html=True)
     btn_calcular = st.button(
@@ -444,6 +457,7 @@ if btn_calcular:
             pct_ajuste_venta=pct_ajuste_venta,
             plan_df=plan_df,
             plan_col=semana_sel,
+            modo_replicar_venta=modo_replicar_venta,
         )
 
     plantilla = _resolver_plantilla()
@@ -457,6 +471,7 @@ if btn_calcular:
         "pct_stock_seg": pct_stock_seg,
         "pct_ajuste_venta": pct_ajuste_venta,
         "semana_sel": semana_sel,
+        "modo_replicar_venta": modo_replicar_venta,
     }
     st.session_state["calc_version"] = st.session_state.get("calc_version", 0) + 1
 
@@ -547,13 +562,27 @@ if "pedido_base" in st.session_state:
     n_total = len(pedido_df)
     params = st.session_state.get("pedido_params", {})
 
+    # Banner de modo replicar venta (debe destacarse antes del detalle)
+    es_modo_replicar = params.get("modo_replicar_venta", False)
+    if es_modo_replicar:
+        st.info(
+            "📋 **Modo Replicar Venta activo** · "
+            "El pedido reproduce exactamente la venta de la semana"
+            + (f" con ajuste **{params.get('pct_ajuste_venta', 0):+.0f}%**" if params.get("pct_ajuste_venta", 0) != 0 else "")
+            + ". Stock real, stock de seguridad y planificación fueron ignorados.",
+            icon=None,
+        )
+
     st.subheader("Detalle por producto")
     captions = []
-    if params.get("pct_stock_seg", 100) < 100:
-        captions.append(f"Stock de seguridad al **{params['pct_stock_seg']}%**")
+    if es_modo_replicar:
+        captions.append("📋 **Replicar venta**")
+    else:
+        if params.get("pct_stock_seg", 100) < 100:
+            captions.append(f"Stock de seguridad al **{params['pct_stock_seg']}%**")
     if params.get("pct_ajuste_venta", 0) != 0:
         captions.append(f"Venta ajustada **{params['pct_ajuste_venta']:+.0f}%**")
-    if plan_aplicado and params.get("semana_sel"):
+    if not es_modo_replicar and plan_aplicado and params.get("semana_sel"):
         captions.append(f"Plan: **{params['semana_sel']}** · banda 97%–105%")
     if captions:
         st.caption(" · ".join(captions))
