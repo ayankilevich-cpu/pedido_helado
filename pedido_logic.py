@@ -492,15 +492,21 @@ def calcular_pedido(
     plan_col: str | None = None,
     pct_plan_min: float = 3.0,
     pct_plan_max: float = 5.0,
+    modo_replicar_venta: bool = False,
 ) -> pd.DataFrame:
     """
     Calcula el pedido de reposición por producto.
 
-    Lógica base:
+    Lógica base (modo normal):
     - venta_ajustada = venta * (1 + pct_ajuste_venta/100)
     - pedido_calc = max(0, ceil(venta_ajustada + stock_seg * pct_stock_seg/100 - stock_real))
 
-    Ajuste por planificación semanal (si `plan_df` y `plan_col` se proveen):
+    Modo replicar venta (modo_replicar_venta=True):
+    - pedido = ceil(venta * (1 + pct_ajuste_venta/100))
+    - Ignora stock real, stock de seguridad y planificación.
+    - Útil para semanas donde se quiere reponer exactamente lo vendido.
+
+    Ajuste por planificación semanal (solo en modo normal):
     - lim_min = ceil(plan * (1 - pct_plan_min/100))
     - lim_max = floor(plan * (1 + pct_plan_max/100))
     - Si plan > 0:
@@ -567,6 +573,26 @@ def calcular_pedido(
             pedido_df.loc[mask, "codigo_carrito"].map(mapeo_desc)
         )
         pedido_df["grupo"] = pedido_df["grupo"].fillna("")
+
+    # ── Modo replicar venta ────────────────────────────────────────────────────
+    # pedido = ceil(venta_ajustada), ignorando stock real, stock de seguridad
+    # y planificación. El ajuste % de venta sí aplica (ya fue aplicado arriba).
+    if modo_replicar_venta:
+        pedido_df["pedido_calc"] = pedido_df["venta"].apply(
+            lambda v: max(0, math.ceil(v))
+        ).astype(int)
+        pedido_df["plan_sem"] = pd.NA
+        pedido_df["pedido"] = pedido_df["pedido_calc"].astype(int)
+        pedido_df["ajuste_plan"] = AJUSTE_NINGUNO
+        pedido_df["pedido_inicial"] = pedido_df["pedido"].astype(int)
+        cols = [
+            "codigo_carrito", "descripcion", "grupo",
+            "venta", "stock_real", "stock_seg",
+            "plan_sem", "pedido_calc", "ajuste_plan",
+            "pedido_inicial", "pedido",
+        ]
+        return pedido_df[cols].sort_values("grupo").reset_index(drop=True)
+    # ── Fin modo replicar venta ───────────────────────────────────────────────
 
     factor = pct_stock_seg / 100
 
