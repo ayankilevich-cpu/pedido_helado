@@ -10,6 +10,7 @@ Deploy en Streamlit Cloud:
 
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as st_components
 import pandas as pd
 from datetime import date, timedelta
 from io import BytesIO
@@ -658,6 +659,25 @@ if "pedido_base" in st.session_state:
                 style = ""
             return [style if c == "Pedido" else "" for c in row.index]
         return df.style.apply(_row, axis=1)
+
+    st_components.html(
+        """
+        <script>
+        (function() {
+            const STORAGE_KEY = 'pedido_scroll_y';
+            const win = window.parent;
+            const saved = sessionStorage.getItem(STORAGE_KEY);
+            if (saved !== null) {
+                win.scrollTo({ top: parseInt(saved, 10), behavior: 'instant' });
+            }
+            win.addEventListener('scroll', function() {
+                sessionStorage.setItem(STORAGE_KEY, Math.round(win.scrollY));
+            }, { passive: true });
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
     edited_display = st.data_editor(
         _styler(display_df) if plan_aplicado else display_df,
