@@ -548,6 +548,25 @@ def calcular_pedido(
     stock_df = stock_df.copy()
     stock_df["codigo"] = stock_df["codigo"].astype(str)
 
+    # ── SKUs granel sin venta ──────────────────────────────────────────────────
+    # Si un sabor granel no tuvo movimiento (faltante, quiebre de stock, baja
+    # estacional), igual aparece en el listado con venta=0 y pedido=0 editable.
+    # Empaquetados se excluyen: su ausencia puede ser discontinuación o no pedido.
+    codigos_con_venta = set(venta_por_codigo["codigo_carrito"].astype(str))
+    granel_sin_venta = stock_df[
+        stock_df["grupo"].isin(GRUPOS_GRANEL)
+        & ~stock_df["codigo"].isin(codigos_con_venta)
+    ][["codigo"]].copy()
+    granel_sin_venta = granel_sin_venta.rename(columns={"codigo": "codigo_carrito"})
+    granel_sin_venta["venta"] = 0.0
+    granel_sin_venta["_sin_venta"] = True  # marca para forzar pedido=0 al final
+
+    venta_por_codigo = pd.concat(
+        [venta_por_codigo, granel_sin_venta],
+        ignore_index=True,
+    )
+    # ── Fin SKUs granel sin venta ──────────────────────────────────────────────
+
     pedido_df = venta_por_codigo.merge(
         stock_df[["codigo", "descripcion", "grupo", "stock_seg", "stock_real"]],
         left_on="codigo_carrito",
@@ -557,6 +576,9 @@ def calcular_pedido(
 
     pedido_df["stock_seg"] = pedido_df["stock_seg"].fillna(0)
     pedido_df["stock_real"] = pedido_df["stock_real"].fillna(0)
+    if "_sin_venta" not in pedido_df.columns:
+        pedido_df["_sin_venta"] = False
+    pedido_df["_sin_venta"] = pedido_df["_sin_venta"].fillna(False)
 
     # Ajuste de venta por estacionalidad: venta * (1 + pct/100)
     pedido_df["venta"] = pedido_df["venta"] * (1 + pct_ajuste_venta / 100)
@@ -584,6 +606,10 @@ def calcular_pedido(
         pedido_df["plan_sem"] = pd.NA
         pedido_df["pedido"] = pedido_df["pedido_calc"].astype(int)
         pedido_df["ajuste_plan"] = AJUSTE_NINGUNO
+        # Granel sin venta → pedido 0 editable (también en modo replicar)
+        mask_sv = pedido_df["_sin_venta"] == True
+        pedido_df.loc[mask_sv, "pedido"] = 0
+        pedido_df.loc[mask_sv, "pedido_calc"] = 0
         pedido_df["pedido_inicial"] = pedido_df["pedido"].astype(int)
         cols = [
             "codigo_carrito", "descripcion", "grupo",
@@ -634,6 +660,11 @@ def calcular_pedido(
         pedido_df["plan_sem"] = pd.NA
         pedido_df["pedido"] = pedido_df["pedido_calc"].astype(int)
         pedido_df["ajuste_plan"] = AJUSTE_NINGUNO
+
+    # Granel sin venta → pedido 0 editable (visible pero sin cantidad sugerida)
+    mask_sv = pedido_df["_sin_venta"] == True
+    pedido_df.loc[mask_sv, "pedido"] = 0
+    pedido_df.loc[mask_sv, "pedido_calc"] = 0
 
     pedido_df["pedido_inicial"] = pedido_df["pedido"].astype(int)
 
