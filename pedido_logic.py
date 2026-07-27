@@ -553,19 +553,19 @@ def calcular_pedido(
     # estacional), igual aparece en el listado con venta=0 y pedido=0 editable.
     # Empaquetados se excluyen: su ausencia puede ser discontinuación o no pedido.
     codigos_con_venta = set(venta_por_codigo["codigo_carrito"].astype(str))
-    granel_sin_venta = stock_df[
-        stock_df["grupo"].isin(GRUPOS_GRANEL)
+    sin_venta = stock_df[
+        stock_df["grupo"].isin(GRUPOS_GRANEL | GRUPOS_EMPAQUETADO)
         & ~stock_df["codigo"].isin(codigos_con_venta)
     ][["codigo"]].copy()
-    granel_sin_venta = granel_sin_venta.rename(columns={"codigo": "codigo_carrito"})
-    granel_sin_venta["venta"] = 0.0
-    granel_sin_venta["_sin_venta"] = True  # marca para forzar pedido=0 al final
+    sin_venta = sin_venta.rename(columns={"codigo": "codigo_carrito"})
+    sin_venta["venta"] = 0.0
+    sin_venta["_sin_venta"] = True  # marca para forzar pedido=0 al final
 
     venta_por_codigo = pd.concat(
-        [venta_por_codigo, granel_sin_venta],
+        [venta_por_codigo, sin_venta],
         ignore_index=True,
     )
-    # ── Fin SKUs granel sin venta ──────────────────────────────────────────────
+    # ── Fin SKUs sin venta ────────────────────────────────────────────────────
 
     pedido_df = venta_por_codigo.merge(
         stock_df[["codigo", "descripcion", "grupo", "stock_seg", "stock_real"]],
