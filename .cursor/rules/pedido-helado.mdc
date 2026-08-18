@@ -1,0 +1,32 @@
+---
+description: Contexto del proyecto Pedido Semanal Grido (Streamlit). Leer AGENTS.md antes de modificar código.
+globs: Clases/GRIDO/PEDIDOS/**
+alwaysApply: false
+---
+
+# Pedido Semanal Grido — regla para agentes
+
+**Antes de cualquier cambio, leé `AGENTS.md` en la raíz del proyecto.** Contiene arquitectura, reglas de negocio, trampas de Streamlit Cloud y runbook de deploy.
+
+## Referencia rápida
+
+- **Prod:** https://pedido-helado.streamlit.app
+- **Repo:** `github.com/ayankilevich-cpu/pedido_helado` · rama `main`
+- **Entrypoint:** `streamlit run app_pedido.py`
+- **Lógica:** `pedido_logic.py` · **UI:** `app_pedido.py`
+- **NO usar repo:** `grido-pedido-semanal`
+
+## Reglas al editar
+
+1. Lógica de negocio → `pedido_logic.py`, no en la UI.
+2. No `st.rerun()` tras `file_uploader` (plantilla/plan/mapeo).
+3. `cargar_datos_plantilla` → solo `pd.read_excel` vectorizado.
+4. Plantilla fiable en Cloud = commit de `data/carrito_template.xlsx`.
+5. Verificar con `python3 -m py_compile app_pedido.py pedido_logic.py` antes de push.
+6. Push solo a `pedido_helado`, rama `main`.
+
+## Fórmula pedido (modo normal)
+
+`pedido = max(0, ceil(venta_aj × (1 + pct/100) + stock_seg × pct_ss/100 − stock_real))`
+
+Plan opcional: banda 97%–105%. Modo «Replicar venta» ignora stock y plan.
