@@ -14,7 +14,7 @@ import numpy as np
 import streamlit as st
 import streamlit.components.v1 as st_components
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -37,6 +37,9 @@ from pedido_logic import (
     obtener_planificacion,
     obtener_semanas,
     semana_default,
+    cargar_historico_pedidos,
+    registrar_pedido_historico,
+    HISTORICO_REPO_PATH,
     MAPEO_PATH,
     PLAN_PATH,
     GRUPOS_GRANEL,
@@ -129,6 +132,15 @@ def _cargar_mapeo_ui() -> pd.DataFrame | None:
     if "mapeo_df" in st.session_state:
         return st.session_state["mapeo_df"]
     return cargar_mapeo_disco()
+
+
+def _github_token() -> str | None:
+    """Token para persistir archivos vía GitHub (ver AGENTS.md §7 "Secrets").
+    None si el secret GITHUB_TOKEN no está configurado."""
+    try:
+        return st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        return None
 
 
 @st.cache_data(show_spinner=False)
@@ -252,10 +264,7 @@ with st.sidebar:
                     # Si hay un token de GitHub configurado, commiteamos la plantilla
                     # al repo para que quede persistida de verdad — mismo efecto que
                     # el procedimiento manual "commit + push + reboot" de AGENTS.md §11.
-                    try:
-                        github_token = st.secrets.get("GITHUB_TOKEN")
-                    except Exception:
-                        github_token = None
+                    github_token = _github_token()
 
                     if github_token and contenido:
                         with st.spinner("Guardando la plantilla en el repo (para que persista)..."):
@@ -387,6 +396,35 @@ with st.sidebar:
 # ── Área principal ────────────────────────────────────────────────────────────
 
 st.title("Pedido Semanal de Helado")
+
+with st.expander("📈 Histórico de pedidos"):
+    _historico = cargar_historico_pedidos()
+    if _historico.empty:
+        st.caption(
+            "Todavía no hay pedidos guardados. Se va completando automáticamente "
+            "cada vez que descargués un carrito."
+        )
+    else:
+        _hist = _historico.copy()
+        _hist["fecha"] = pd.to_datetime(_hist["fecha"])
+        _hist = _hist.sort_values("fecha")
+        st.line_chart(_hist.set_index("fecha")[["total_con_iva"]])
+
+        _tabla = _hist.sort_values("fecha", ascending=False).head(10)[
+            ["fecha", "total_bultos", "total_kilos", "subtotal_sin_iva", "total_con_iva"]
+        ]
+        st.dataframe(
+            _tabla,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fecha": st.column_config.DatetimeColumn("Fecha", format="DD/MM/YYYY HH:mm"),
+                "total_bultos": st.column_config.NumberColumn("Bultos"),
+                "total_kilos": st.column_config.NumberColumn("Kilos", format="%.1f"),
+                "subtotal_sin_iva": st.column_config.NumberColumn("Subtotal", format="$ %.0f"),
+                "total_con_iva": st.column_config.NumberColumn("Total c/IVA", format="$ %.0f"),
+            },
+        )
 
 col1, col2, col3 = st.columns(3)
 
@@ -871,7 +909,7 @@ if "pedido_base" in st.session_state:
     plantilla = _resolver_plantilla()
     excel_buffer = escribir_carrito(plantilla, pedido_export)
 
-    st.download_button(
+    descargado = st.download_button(
         label="Descargar Carrito Excel",
         data=excel_buffer,
         file_name="pedido_semanal.xlsx",
@@ -879,3 +917,36 @@ if "pedido_base" in st.session_state:
         type="primary",
         use_container_width=True,
     )
+
+    if descargado:
+        _params = st.session_state.get("pedido_params", {})
+        fila_historico = {
+            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "total_bultos": total_bultos,
+            "cajas_granel": cajas_granel,
+            "total_kilos": round(total_kilos, 1),
+            "total_cubicaje": round(total_cubicaje, 2),
+            "subtotal_sin_iva": round(subtotal_sin_iva, 2),
+            "total_con_iva": round(total_con_iva, 2),
+            "n_productos": int(pos.sum()),
+            "modo_replicar_venta": _params.get("modo_replicar_venta", False),
+            "semana_plan": _params.get("semana_sel") or "",
+        }
+        historico_actualizado, _guardado_disco = registrar_pedido_historico(fila_historico)
+
+        github_token = _github_token()
+        if github_token:
+            contenido_historico = historico_actualizado.to_csv(index=False).encode("utf-8")
+            ok_gh, err_gh = actualizar_archivo_en_github(
+                contenido_historico,
+                token=github_token,
+                path_repo=HISTORICO_REPO_PATH,
+                mensaje=f"chore: registrar pedido del {fila_historico['fecha']}",
+            )
+            if not ok_gh:
+                logger.warning("No se pudo commitear el histórico de pedidos a GitHub: %s", err_gh)
+        else:
+            logger.info(
+                "Pedido registrado solo en disco (sin GITHUB_TOKEN, no persiste entre reinicios)."
+            )
+        st.toast("Pedido registrado en el histórico 📈")
