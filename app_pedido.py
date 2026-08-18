@@ -21,7 +21,7 @@ from pedido_logic import (
     cargar_mixventas,
     cargar_stock,
     generar_mapeo,
-    cargar_mapeo,
+    cargar_mapeo_disco,
     calcular_pedido,
     cargar_datos_plantilla,
     escribir_carrito,
@@ -86,6 +86,13 @@ def _pedido_numpy_desde_editor(
             except (TypeError, ValueError):
                 pass
     return np.maximum(out, 0.0)
+
+
+def _cargar_mapeo_ui() -> pd.DataFrame | None:
+    """Resuelve el mapeo activo: prioriza session_state, si no cae a disco."""
+    if "mapeo_df" in st.session_state:
+        return st.session_state["mapeo_df"]
+    return cargar_mapeo_disco()
 
 
 # ── Sidebar: plantilla del carrito ────────────────────────────────────────────
@@ -207,7 +214,7 @@ with st.sidebar:
         st.success("Mapeo actualizado")
         st.rerun()
 
-    mapeo_existente = cargar_mapeo()
+    mapeo_existente = _cargar_mapeo_ui()
     if mapeo_existente is not None:
         n_total = len(mapeo_existente)
         n_sin = (mapeo_existente["descripcion_carrito"] == "SIN MAPEO").sum()

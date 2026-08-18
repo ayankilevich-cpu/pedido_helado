@@ -220,9 +220,8 @@ Claves importantes:
 
 ### Código
 
-- `cargar_mapeo()` importa `streamlit` dentro de `pedido_logic.py` (acoplamiento conocido).
-- `mapeo_desc` en `calcular_pedido` usa `zip` posicional — posible bug si hay NaN en descripciones de stock (usar dict por código si se corrige).
-- `numpy` se usa en `app_pedido.py` pero debe estar en `requirements.txt`.
+- `numpy` se usa en `app_pedido.py` y está declarado en `requirements.txt`.
+- `pedido_logic.py` es puro (sin `import streamlit`). El mapeo se resuelve así: `cargar_mapeo_disco()` en `pedido_logic.py` lee solo de disco; `_cargar_mapeo_ui()` en `app_pedido.py` prioriza `session_state["mapeo_df"]` y si no hay, cae a `cargar_mapeo_disco()`. Mantener esta separación al tocar mapeo — es lo que permite testear `pedido_logic.py` sin contexto Streamlit (ago 2026, ver §12).
 
 ---
 
@@ -276,11 +275,21 @@ pip install -r requirements.txt
 streamlit run app_pedido.py
 ```
 
-Verificar sintaxis antes de commit:
+Verificar sintaxis y tests antes de commit:
 
 ```bash
 python3 -m py_compile app_pedido.py pedido_logic.py
+pytest -q
 ```
+
+`tests/` cubre `calcular_pedido` (modo normal, replicar venta, banda de plan,
+SKUs sin venta, regresión del bug de descripciones cruzadas) y el parseo de
+semanas (`_parsear_semana`, `inicio_semana`, `fin_semana`, `semana_default`).
+Corre sin contexto Streamlit — `pedido_logic.py` no importa `streamlit`
+(ver §7 "Código"). CI en `.github/workflows/ci.yml` corre `py_compile` +
+`pytest` en cada push/PR (no bloquea el redeploy automático de Streamlit
+Cloud, que dispara con cualquier push a `main` — el valor es detectar
+roturas antes de mergear).
 
 ---
 
@@ -325,6 +334,9 @@ python3 -m py_compile app_pedido.py pedido_logic.py
 | `04a6c7b` | Fix scroll persistente en `data_editor` |
 | Mayo 2026 | Plantilla nueva 410 productos; remote corregido a `pedido_helado` |
 | Ago 2026 | Documentación `AGENTS.md` + Cursor rule |
+| Ago 2026 | Fix bug de descripciones cruzadas en `calcular_pedido` (`zip` posicional con códigos duplicados en `mapeo_productos.csv`) |
+| Ago 2026 | Desacople de `streamlit`: `cargar_mapeo()` → `cargar_mapeo_disco()` (puro) + `_cargar_mapeo_ui()` en `app_pedido.py` |
+| Ago 2026 | `tests/` con pytest (`calcular_pedido`, parseo de semanas) + CI en `.github/workflows/ci.yml` |
 
 ---
 
@@ -336,6 +348,7 @@ python3 -m py_compile app_pedido.py pedido_logic.py
 - [ ] Asumir que uploads en Cloud persisten en disco
 - [ ] Modificar lógica de negocio en `app_pedido.py` (pertenece a `pedido_logic.py`)
 - [ ] Commitear `.xls` de ejemplo con datos reales (están en `.gitignore`)
+- [ ] Olvidar `pytest -q` antes de push (o dejar que lo corra solo el CI)
 - [ ] Olvidar `py_compile` antes de push
 
 ---

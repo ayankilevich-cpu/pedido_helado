@@ -321,13 +321,12 @@ def generar_mapeo(
     return resultado_final
 
 
-def cargar_mapeo(mapeo_path: Path | str = MAPEO_PATH) -> pd.DataFrame | None:
-    """Carga el mapeo existente si hay uno (disco o session_state)."""
-    import streamlit as _st
+def cargar_mapeo_disco(mapeo_path: Path | str = MAPEO_PATH) -> pd.DataFrame | None:
+    """Carga el mapeo existente desde disco, si hay uno.
 
-    if "mapeo_df" in _st.session_state:
-        return _st.session_state["mapeo_df"]
-
+    No depende de Streamlit: la resolución contra `session_state` (mapeo
+    editado en la sesión actual, aún no persistido) vive en `app_pedido.py`.
+    """
     mapeo_path = Path(mapeo_path)
     if mapeo_path.exists():
         df = pd.read_csv(mapeo_path, dtype={"codigo_carrito": str})
@@ -584,12 +583,10 @@ def calcular_pedido(
     pedido_df["venta"] = pedido_df["venta"] * (1 + pct_ajuste_venta / 100)
 
     if pedido_df["descripcion"].isna().any():
-        mapeo_desc = dict(
-            zip(
-                mapeo_valido["codigo_carrito"],
-                mapeo.loc[mapeo["codigo_carrito"].isin(mapeo_valido["codigo_carrito"]), "descripcion_carrito"],
-            )
-        )
+        # mapeo_valido puede tener codigo_carrito duplicado (varios nombre_venta
+        # apuntando al mismo código) — construir el dict directo desde ahí evita
+        # desalinear las dos secuencias del zip al re-filtrar `mapeo` por isin().
+        mapeo_desc = dict(zip(mapeo_valido["codigo_carrito"], mapeo_valido["descripcion_carrito"]))
         mask = pedido_df["descripcion"].isna()
         pedido_df.loc[mask, "descripcion"] = (
             pedido_df.loc[mask, "codigo_carrito"].map(mapeo_desc)
