@@ -66,6 +66,7 @@ Entradas (.xls / .xlsx / .csv)
 | `mapeo_productos.csv` | Nombre en ventas → código carrito (110 filas) |
 | `data/carrito_template.xlsx` | Plantilla del portal: precios, cubicaje, peso (410 productos) |
 | `data/compras_semanales_actual.csv` | Planificación semanal (opcional; se sube por UI o se commitea) |
+| `data/historico_pedidos.csv` | Histórico de pedidos descargados, para el dashboard de tendencias (§5.8) — se genera solo, no se edita a mano |
 | `requirements.txt` | Dependencias Python |
 | `.streamlit/config.toml` | Tema UI, `maxUploadSize = 50` MB |
 
@@ -178,6 +179,19 @@ CSV con columnas `Semana_<n>_<Mes>_<Año>` (ej. `Semana_18_Mayo_2026`). Semanas 
 - Total con IVA = subtotal × **1.21**
 - Cubicaje, kilos, cajas granel calculados con numpy desde el editor
 
+### 5.8 Histórico de pedidos y dashboard de tendencias
+
+Expander **"📈 Histórico de pedidos"** al tope del área principal (visible sin necesidad de calcular un pedido nuevo). Muestra `st.line_chart` de `total_con_iva` a lo largo del tiempo + tabla de los últimos 10 registros.
+
+Se registra **una fila por cada click en "Descargar Carrito Excel"** (no por cada cálculo — el usuario puede recalcular varias veces ajustando sliders antes de decidirse) en `data/historico_pedidos.csv`. Columnas (contrato en `HISTORICO_COLUMNAS`, `pedido_logic.py`):
+
+```
+fecha, total_bultos, cajas_granel, total_kilos, total_cubicaje,
+subtotal_sin_iva, total_con_iva, n_productos, modo_replicar_venta, semana_plan
+```
+
+Igual que la plantilla del carrito, el disco de Streamlit Cloud es efímero — sin el secret `GITHUB_TOKEN` configurado (ver §7 "Secrets") el histórico se pierde en el próximo reinicio del contenedor, lo cual rompería el propósito del feature. Con el secret puesto, cada descarga commitea el CSV actualizado al repo automáticamente (mismo mecanismo que la plantilla, `actualizar_archivo_en_github` con `HISTORICO_REPO_PATH`).
+
 ---
 
 ## 6. Estado de Streamlit (`session_state`)
@@ -216,7 +230,7 @@ Todos son **opcionales** — sin configurarlos la app funciona igual que antes (
 | Secret | Efecto |
 |--------|--------|
 | `APP_PASSWORD` | Si está seteado, `_password_gate()` en `app_pedido.py` exige esa contraseña antes de mostrar la app (gate simple, un solo usuario — no hay sistema de cuentas). Sin este secret, no pide login (así queda el desarrollo local). |
-| `GITHUB_TOKEN` | Token con permiso de escritura sobre el repo (`repo` classic o "Contents: Read and write" fine-grained). Si está, subir una plantilla nueva la commitea al repo automáticamente (ver arriba). Sin este secret, la plantilla subida por UI solo dura hasta el próximo reinicio del contenedor. |
+| `GITHUB_TOKEN` | Token con permiso de escritura sobre el repo (`repo` classic o "Contents: Read and write" fine-grained — **no** dejar "Public Repositories (read-only)" en fine-grained, da 403). Si está: (1) subir una plantilla nueva la commitea al repo automáticamente, (2) cada descarga de carrito commitea `data/historico_pedidos.csv` actualizado (§5.8). Sin este secret, ninguno de los dos persiste entre reinicios del contenedor. |
 | `GITHUB_REPO` | Override del repo destino para el commit automático. Por defecto `ayankilevich-cpu/pedido_helado` (`GITHUB_REPO_DEFAULT` en `pedido_logic.py`) — normalmente no hace falta tocarlo. |
 
 ### UI / reruns
@@ -286,6 +300,8 @@ plan_sem, pedido_calc, ajuste_plan, pedido_inicial, pedido
 | Persistencia de plantilla vía GitHub | `pedido_logic.py` / `app_pedido.py` | `actualizar_archivo_en_github` / bloque de subida en sidebar (usa secret `GITHUB_TOKEN`) |
 | Password gate | `app_pedido.py` | `_password_gate()` (usa secret `APP_PASSWORD`) |
 | Cache de la plantilla | `app_pedido.py` | `_cargar_datos_plantilla_ui` / `_cargar_datos_plantilla_disco` (`@st.cache_data`) |
+| Histórico de pedidos / dashboard | `pedido_logic.py` | `registrar_pedido_historico`, `cargar_historico_pedidos`, `HISTORICO_COLUMNAS` |
+| Qué se registra en cada descarga | `app_pedido.py` | bloque `if descargado:` justo después de `st.download_button` |
 
 ---
 
@@ -365,6 +381,7 @@ roturas antes de mergear).
 | Ago 2026 | Logging (`logging`, stdlib) en `pedido_logic.py`/`app_pedido.py`; los `except OSError` de guardado en disco dejan de ser silenciosos |
 | Ago 2026 | Password gate opcional (`_password_gate()`, secret `APP_PASSWORD`) |
 | Ago 2026 | Persistencia de la plantilla del carrito vía GitHub (`actualizar_archivo_en_github`, secret `GITHUB_TOKEN`): subir una plantilla nueva desde el sidebar ahora la commitea al repo automáticamente, así sobrevive a un reinicio del contenedor sin pasos manuales |
+| Ago 2026 | Histórico de pedidos y dashboard de tendencias (§5.8): expander con `st.line_chart` + tabla, se registra una fila en `data/historico_pedidos.csv` por cada descarga de carrito y se commitea a GitHub con el mismo mecanismo que la plantilla |
 
 ---
 

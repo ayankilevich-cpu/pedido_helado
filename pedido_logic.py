@@ -23,10 +23,19 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 MAPEO_PATH = Path(__file__).parent / "mapeo_productos.csv"
 PLAN_PATH = DATA_DIR / "compras_semanales_actual.csv"
+HISTORICO_PATH = DATA_DIR / "historico_pedidos.csv"
 
-# Ruta relativa al root del repo (para la API de contenidos de GitHub, que no
-# acepta rutas absolutas de filesystem). Debe coincidir con DATA_DIR / archivo.
+# Rutas relativas al root del repo (para la API de contenidos de GitHub, que no
+# acepta rutas absolutas de filesystem). Deben coincidir con DATA_DIR / archivo.
 TEMPLATE_REPO_PATH = "data/carrito_template.xlsx"
+HISTORICO_REPO_PATH = "data/historico_pedidos.csv"
+
+# Columnas del histórico de pedidos (ver registrar_pedido_historico).
+HISTORICO_COLUMNAS = [
+    "fecha", "total_bultos", "cajas_granel", "total_kilos", "total_cubicaje",
+    "subtotal_sin_iva", "total_con_iva", "n_productos",
+    "modo_replicar_venta", "semana_plan",
+]
 
 # Repo por defecto para la persistencia vía GitHub (ver actualizar_archivo_en_github).
 # Un solo repo válido para esta app (ver AGENTS.md §2) — no hace falta configurarlo
@@ -953,3 +962,51 @@ def escribir_carrito(
     wb.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+# ---------------------------------------------------------------------------
+# 7. Histórico de pedidos (para el dashboard de tendencias)
+# ---------------------------------------------------------------------------
+#
+# Una fila resumen por cada carrito efectivamente descargado (no por cada
+# cálculo — el usuario puede recalcular varias veces ajustando sliders antes
+# de decidirse). Igual que la plantilla, el disco de Streamlit Cloud es
+# efímero: si no se commitea a GitHub el histórico se pierde en el próximo
+# reinicio, lo que rompería el propósito del feature. Ver wiring en
+# app_pedido.py, que llama a actualizar_archivo_en_github con HISTORICO_REPO_PATH.
+
+def cargar_historico_pedidos(path: Path | str = HISTORICO_PATH) -> pd.DataFrame:
+    """Lee el histórico de pedidos descargados. DataFrame vacío (con las
+    columnas del contrato) si todavía no hay ninguno guardado."""
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame(columns=HISTORICO_COLUMNAS)
+    try:
+        return pd.read_csv(path)
+    except Exception as e:
+        logger.warning("No se pudo leer el histórico de pedidos en %s: %s", path, e)
+        return pd.DataFrame(columns=HISTORICO_COLUMNAS)
+
+
+def registrar_pedido_historico(
+    fila: dict, path: Path | str = HISTORICO_PATH
+) -> tuple[pd.DataFrame, bool]:
+    """Agrega `fila` (debe tener las claves de HISTORICO_COLUMNAS) al histórico
+    y lo guarda en disco. Devuelve (histórico_actualizado, guardado_en_disco) —
+    el caller decide si además lo commitea a GitHub para que persista de verdad."""
+    historico = cargar_historico_pedidos(path)
+    actualizado = pd.concat(
+        [historico, pd.DataFrame([{c: fila.get(c) for c in HISTORICO_COLUMNAS}])],
+        ignore_index=True,
+    )
+
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        actualizado.to_csv(path, index=False)
+        guardado = True
+    except OSError as e:
+        logger.warning("No se pudo guardar el histórico de pedidos en %s: %s", path, e)
+        guardado = False
+
+    return actualizado, guardado
