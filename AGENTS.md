@@ -195,6 +195,7 @@ Claves importantes:
 | `calc_version` | Incrementa al recalcular; invalida key del `data_editor` |
 | `_plantilla_mtime` | Detecta cambio de plantilla en disco |
 | `_plantilla_file_sig` / `_plan_file_sig` | `(nombre, tamaño)` para evitar re-procesar uploads |
+| `auth_ok` | Gate de contraseña (ver §7 "Secrets"): `True` tras login correcto en la sesión |
 
 **Invalidación de cache:** si cambia `mtime` de `data/carrito_template.xlsx`, se limpian `plantilla_bytes`, `pedido_base`, `mapeo_df`, etc.
 
@@ -204,24 +205,42 @@ Claves importantes:
 
 ### Streamlit Cloud
 
-- **Filesystem efímero:** uploads guardados con `_guardar_plantilla` / `_guardar_planificacion` / `to_csv(MAPEO_PATH)` **no persisten** entre sesiones/reboots. La forma fiable de actualizar plantilla = **commit** de `data/carrito_template.xlsx` + push + reboot app.
-- **App pública** (sin auth): cualquiera con la URL ve precios del carrito.
+- **Filesystem efímero:** uploads guardados con `_guardar_plantilla` / `_guardar_planificacion` / `to_csv(MAPEO_PATH)` **no persisten** entre sesiones/reboots — el contenedor puede reiniciarse (sleep por inactividad, redeploy) y vuelve a lo que esté commiteado en el repo. Ambas funciones ahora devuelven `(contenido, guardado_en_disco)`; si `guardado_en_disco=False` la UI avisa que el cambio dura solo la sesión actual.
+  - **Excepción — plantilla del carrito:** si el secret `GITHUB_TOKEN` está configurado, subir una plantilla nueva desde el sidebar además la commitea al repo automáticamente vía `actualizar_archivo_en_github` (API de contenidos de GitHub), así que sí persiste entre reinicios sin pasos manuales. Ver "Secrets" más abajo. `mapeo_productos.csv` y la planificación semanal **no** tienen este mecanismo (solo el flujo manual: descargar CSV, editar, volver a subir) — evaluar si agregarlo si la fricción es real (ver propuesta de mejora, tier 3).
+  - Alternativa manual sin secret configurado: **commit** de `data/carrito_template.xlsx` + push + reboot app (procedimiento de §11).
+
+### Secrets (Streamlit Cloud → Manage app → Settings → Secrets)
+
+Todos son **opcionales** — sin configurarlos la app funciona igual que antes (login desactivado, plantilla subida solo persiste hasta el próximo reinicio).
+
+| Secret | Efecto |
+|--------|--------|
+| `APP_PASSWORD` | Si está seteado, `_password_gate()` en `app_pedido.py` exige esa contraseña antes de mostrar la app (gate simple, un solo usuario — no hay sistema de cuentas). Sin este secret, no pide login (así queda el desarrollo local). |
+| `GITHUB_TOKEN` | Token con permiso de escritura sobre el repo (`repo` classic o "Contents: Read and write" fine-grained). Si está, subir una plantilla nueva la commitea al repo automáticamente (ver arriba). Sin este secret, la plantilla subida por UI solo dura hasta el próximo reinicio del contenedor. |
+| `GITHUB_REPO` | Override del repo destino para el commit automático. Por defecto `ayankilevich-cpu/pedido_helado` (`GITHUB_REPO_DEFAULT` en `pedido_logic.py`) — normalmente no hace falta tocarlo. |
 
 ### UI / reruns
 
 - **No usar `st.rerun()`** inmediatamente después de `file_uploader` (plantilla, plan, mapeo). Provoca reruns encadenados y el botón «Calcular Pedido» no se procesa. Usar firma `(nombre, tamaño)` y procesar en el mismo run.
 - **Scroll del editor:** `st.data_editor` hace rerun y la página vuelve al top. Fix: snippet JS con `sessionStorage` (`pedido_scroll_y`) inyectado vía `st_components.html` **antes** del editor (commit `04a6c7b`).
 - **Ediciones del editor:** usar `_pedido_numpy_desde_editor` leyendo `edited_rows` de `session_state` — el DataFrame devuelto por `st.data_editor` a veces no refleja el último cambio.
+- **`st.set_page_config` debe ser el primer comando de Streamlit del script.** `_password_gate()` se llama justo después (y hace `st.stop()` si no está autenticado) — no insertar nada de UI entre esas dos líneas.
+
+### Errores y logging
+
+- Los 3 loaders de ventas/stock (`cargar_cajas_terminadas`, `cargar_mixventas`, `cargar_stock`) validan columnas/forma antes de procesar y levantan `ArchivoInvalidoError` con un mensaje accionable (ej. "¿subiste el archivo correcto en ese cuadro?") en vez de dejar pasar un `KeyError` crudo. El bloque `if btn_calcular:` en `app_pedido.py` atrapa `ArchivoInvalidoError` → `st.error(str(e))`, y cualquier otra excepción → mensaje genérico + `logger.exception(...)`.
+- `pedido_logic.py` y `app_pedido.py` usan `logging` (stdlib, no rompe la pureza de `pedido_logic.py`). Streamlit Cloud captura stdout/stderr en "Manage app → Logs". Los `except OSError` de guardado en disco ya no son silenciosos: loguean `logger.warning(...)`.
 
 ### Performance
 
 - `cargar_datos_plantilla`: pandas + `usecols=[1,5,6,8]` (~60 ms). Commit `959479a`.
-- Evitar llamadas repetidas innecesarias en cada render.
+- Cacheada con `st.cache_data` vía `_cargar_datos_plantilla_ui` / `_cargar_datos_plantilla_disco` en `app_pedido.py`, keyed por `(ruta, mtime)` — se llama hasta 4 veces por sesión (sidebar, cálculo, refresco de resultados, backfill de peso) y sin cache releía el mismo Excel cada vez. La key con `mtime` invalida el cache solo cuando el archivo cambia en disco.
 
 ### Código
 
 - `numpy` se usa en `app_pedido.py` y está declarado en `requirements.txt`.
 - `pedido_logic.py` es puro (sin `import streamlit`). El mapeo se resuelve así: `cargar_mapeo_disco()` en `pedido_logic.py` lee solo de disco; `_cargar_mapeo_ui()` en `app_pedido.py` prioriza `session_state["mapeo_df"]` y si no hay, cae a `cargar_mapeo_disco()`. Mantener esta separación al tocar mapeo — es lo que permite testear `pedido_logic.py` sin contexto Streamlit (ago 2026, ver §12).
+- `requests` es dependencia directa (persistencia vía GitHub) — declarada en `requirements.txt`, no solo transitiva de `streamlit`.
 
 ---
 
@@ -263,6 +282,10 @@ plan_sem, pedido_calc, ajuste_plan, pedido_inicial, pedido
 | Tabla editable / métricas | `app_pedido.py` | bloque `if "pedido_base" in st.session_state` |
 | Scroll persistente | `app_pedido.py` | `st_components.html` antes de `st.data_editor` |
 | Modo replicar venta | ambos | toggle en UI → param en `calcular_pedido` |
+| Mensaje de error de un upload inválido | `pedido_logic.py` | `ArchivoInvalidoError` en `cargar_cajas_terminadas`/`cargar_mixventas`/`cargar_stock` |
+| Persistencia de plantilla vía GitHub | `pedido_logic.py` / `app_pedido.py` | `actualizar_archivo_en_github` / bloque de subida en sidebar (usa secret `GITHUB_TOKEN`) |
+| Password gate | `app_pedido.py` | `_password_gate()` (usa secret `APP_PASSWORD`) |
+| Cache de la plantilla | `app_pedido.py` | `_cargar_datos_plantilla_ui` / `_cargar_datos_plantilla_disco` (`@st.cache_data`) |
 
 ---
 
@@ -337,6 +360,11 @@ roturas antes de mergear).
 | Ago 2026 | Fix bug de descripciones cruzadas en `calcular_pedido` (`zip` posicional con códigos duplicados en `mapeo_productos.csv`) |
 | Ago 2026 | Desacople de `streamlit`: `cargar_mapeo()` → `cargar_mapeo_disco()` (puro) + `_cargar_mapeo_ui()` en `app_pedido.py` |
 | Ago 2026 | `tests/` con pytest (`calcular_pedido`, parseo de semanas) + CI en `.github/workflows/ci.yml` |
+| Ago 2026 | Cache de `cargar_datos_plantilla` con `st.cache_data` (key `(ruta, mtime)`) |
+| Ago 2026 | Errores de upload accionables: `ArchivoInvalidoError` en los 3 loaders de ventas/stock + try/except en `btn_calcular` |
+| Ago 2026 | Logging (`logging`, stdlib) en `pedido_logic.py`/`app_pedido.py`; los `except OSError` de guardado en disco dejan de ser silenciosos |
+| Ago 2026 | Password gate opcional (`_password_gate()`, secret `APP_PASSWORD`) |
+| Ago 2026 | Persistencia de la plantilla del carrito vía GitHub (`actualizar_archivo_en_github`, secret `GITHUB_TOKEN`): subir una plantilla nueva desde el sidebar ahora la commitea al repo automáticamente, así sobrevive a un reinicio del contenedor sin pasos manuales |
 
 ---
 
@@ -350,6 +378,8 @@ roturas antes de mergear).
 - [ ] Commitear `.xls` de ejemplo con datos reales (están en `.gitignore`)
 - [ ] Olvidar `pytest -q` antes de push (o dejar que lo corra solo el CI)
 - [ ] Olvidar `py_compile` antes de push
+- [ ] Commitear un `GITHUB_TOKEN` o cualquier secret en el código (van solo en Streamlit Cloud → Secrets)
+- [ ] Asumir que subir la plantilla persiste entre reinicios sin `GITHUB_TOKEN` configurado
 
 ---
 

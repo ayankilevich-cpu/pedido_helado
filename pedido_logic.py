@@ -4,6 +4,8 @@ Lógica de negocio para el cálculo del pedido semanal de helado.
 Flujo: ventas (cajas terminadas + mixventas) + stock → pedido → carrito Excel
 """
 
+import base64
+import logging
 import math
 import os
 import re
@@ -12,12 +14,28 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import requests
 from openpyxl import load_workbook
 from rapidfuzz import fuzz, process
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent / "data"
 MAPEO_PATH = Path(__file__).parent / "mapeo_productos.csv"
 PLAN_PATH = DATA_DIR / "compras_semanales_actual.csv"
+
+# Ruta relativa al root del repo (para la API de contenidos de GitHub, que no
+# acepta rutas absolutas de filesystem). Debe coincidir con DATA_DIR / archivo.
+TEMPLATE_REPO_PATH = "data/carrito_template.xlsx"
+
+# Repo por defecto para la persistencia vía GitHub (ver actualizar_archivo_en_github).
+# Un solo repo válido para esta app (ver AGENTS.md §2) — no hace falta configurarlo
+# por secret salvo que se quiera apuntar a otro lado.
+GITHUB_REPO_DEFAULT = "ayankilevich-cpu/pedido_helado"
+
+
+class ArchivoInvalidoError(Exception):
+    """El archivo subido no tiene el formato esperado por un loader de negocio."""
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +44,20 @@ PLAN_PATH = DATA_DIR / "compras_semanales_actual.csv"
 
 def cargar_cajas_terminadas(file) -> pd.DataFrame:
     """Lee el .xls de cajas terminadas y agrupa por sabor (consolidado)."""
-    df = pd.read_excel(file, engine="xlrd")
+    try:
+        df = pd.read_excel(file, engine="xlrd")
+    except Exception as e:
+        raise ArchivoInvalidoError(
+            f"No se pudo leer el archivo de Cajas Terminadas como .xls: {e}"
+        ) from e
+
+    faltantes = {"artdescrip", "ctecantidad"} - set(df.columns)
+    if faltantes:
+        raise ArchivoInvalidoError(
+            "El archivo de Cajas Terminadas no tiene las columnas esperadas "
+            f"({', '.join(sorted(faltantes))}). ¿Es el archivo correcto para este cuadro?"
+        )
+
     agrupado = (
         df.groupby("artdescrip", as_index=False)["ctecantidad"]
         .sum()
@@ -43,7 +74,20 @@ def cargar_mixventas(file) -> pd.DataFrame:
     automáticamente por patrón en el nombre y se etiquetan como "granel"
     con el nombre en MAYÚSCULAS para coincidir con cajas terminadas.
     """
-    df = pd.read_excel(file, engine="xlrd")
+    try:
+        df = pd.read_excel(file, engine="xlrd")
+    except Exception as e:
+        raise ArchivoInvalidoError(
+            f"No se pudo leer el archivo de Mix Ventas como .xls: {e}"
+        ) from e
+
+    faltantes = {"artdescrip", "subgrupo", "bultos"} - set(df.columns)
+    if faltantes:
+        raise ArchivoInvalidoError(
+            "El archivo de Mix Ventas no tiene las columnas esperadas "
+            f"({', '.join(sorted(faltantes))}). ¿Es el archivo correcto para este cuadro?"
+        )
+
     mask = (df["subgrupo"] == 1) & (df["bultos"].notna()) & (df["bultos"] > 0)
     resultado = (
         df.loc[mask, ["artdescrip", "bultos"]]
@@ -73,7 +117,22 @@ def cargar_stock(file) -> pd.DataFrame:
     Retorna DataFrame con: codigo, descripcion, stock_seg, stock_real.
     Fila 0 del Excel es el header.
     """
-    df = pd.read_excel(file, header=None, skiprows=1)
+    try:
+        df = pd.read_excel(file, header=None, skiprows=1)
+    except Exception as e:
+        raise ArchivoInvalidoError(
+            f"No se pudo leer el archivo de Stock como .xlsx: {e}"
+        ) from e
+
+    if df.shape[1] < 7:
+        raise ArchivoInvalidoError(
+            "El archivo de Stock no tiene el formato esperado (se esperaban al "
+            f"menos 7 columnas y tiene {df.shape[1]}). ¿Es el archivo correcto "
+            "para este cuadro?"
+        )
+    if df.empty:
+        raise ArchivoInvalidoError("El archivo de Stock no tiene filas de datos.")
+
     stock = pd.DataFrame({
         "codigo": df[1].astype(str).str.replace(r"\.0$", "", regex=True).str.strip(),
         "descripcion": df[4].astype(str).str.strip(),
@@ -316,8 +375,8 @@ def generar_mapeo(
 
     try:
         resultado_final.to_csv(mapeo_path, index=False)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("No se pudo guardar mapeo_productos.csv en %s: %s", mapeo_path, e)
     return resultado_final
 
 
@@ -384,8 +443,13 @@ def cargar_planificacion(file) -> pd.DataFrame:
     return df
 
 
-def _guardar_planificacion(file, dest: Path | str = PLAN_PATH) -> bytes | None:
-    """Guarda copia local del CSV de planificación. Devuelve los bytes."""
+def _guardar_planificacion(file, dest: Path | str = PLAN_PATH) -> tuple[bytes | None, bool]:
+    """Guarda copia local del CSV de planificación.
+
+    Devuelve (contenido, guardado_en_disco). `guardado_en_disco=False` en
+    Streamlit Cloud significa que el archivo NO sobrevive a un reinicio del
+    contenedor (filesystem efímero, ver AGENTS.md §7) — el caller debe avisar.
+    """
     dest = Path(dest)
     if hasattr(file, "read"):
         if hasattr(file, "seek"):
@@ -404,9 +468,11 @@ def _guardar_planificacion(file, dest: Path | str = PLAN_PATH) -> bytes | None:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(contenido)
-    except OSError:
-        pass
-    return contenido
+        guardado = True
+    except OSError as e:
+        logger.warning("No se pudo guardar la planificación en %s: %s", dest, e)
+        guardado = False
+    return contenido, guardado
 
 
 def obtener_planificacion() -> Path | None:
@@ -724,8 +790,14 @@ def validar_plantilla_carrito(contenido: bytes) -> tuple[bool, str]:
     return ok, msg
 
 
-def _guardar_plantilla(file, dest: Path | str = DATA_DIR / "carrito_template.xlsx") -> bytes | None:
-    """Guarda una copia de la plantilla del carrito. Retorna los bytes para session_state."""
+def _guardar_plantilla(file, dest: Path | str = DATA_DIR / "carrito_template.xlsx") -> tuple[bytes | None, bool]:
+    """Guarda una copia local de la plantilla del carrito.
+
+    Devuelve (contenido, guardado_en_disco). `guardado_en_disco=False` en
+    Streamlit Cloud significa que el archivo NO sobrevive a un reinicio del
+    contenedor (filesystem efímero, ver AGENTS.md §7) — el caller debe avisar.
+    Para persistencia real entre reinicios ver `actualizar_archivo_en_github`.
+    """
     dest = Path(dest)
     if hasattr(file, "read"):
         contenido = file.read()
@@ -736,15 +808,83 @@ def _guardar_plantilla(file, dest: Path | str = DATA_DIR / "carrito_template.xls
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(contenido)
-    except OSError:
-        pass
-    return contenido
+        guardado = True
+    except OSError as e:
+        logger.warning("No se pudo guardar la plantilla en %s: %s", dest, e)
+        guardado = False
+    return contenido, guardado
 
 
 def obtener_plantilla() -> Path | None:
     """Retorna la ruta de la última plantilla guardada, si existe."""
     p = DATA_DIR / "carrito_template.xlsx"
     return p if p.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# 6bis. Persistencia remota (GitHub) — filesystem efímero de Streamlit Cloud
+# ---------------------------------------------------------------------------
+#
+# El disco de Streamlit Cloud no sobrevive a un reinicio del contenedor
+# (sleep por inactividad, redeploy, etc.) — ver AGENTS.md §7. `_guardar_plantilla`
+# deja la plantilla usable para la sesión actual, pero al próximo arranque en
+# frío la app vuelve a leer lo que esté commiteado en el repo. Esta función
+# automatiza el procedimiento manual ya documentado en AGENTS.md §11
+# ("commit + push + reboot") vía la API de contenidos de GitHub, para que una
+# plantilla subida por UI quede persistida de verdad sin depender de que
+# alguien la vuelva a subir manualmente al repo.
+#
+# No depende de Streamlit: token y repo se resuelven en app_pedido.py desde
+# st.secrets y se pasan como parámetros.
+
+def actualizar_archivo_en_github(
+    contenido: bytes,
+    token: str,
+    path_repo: str = TEMPLATE_REPO_PATH,
+    repo: str = GITHUB_REPO_DEFAULT,
+    mensaje: str = "chore: actualizar plantilla del carrito vía app",
+    branch: str = "main",
+) -> tuple[bool, str]:
+    """Commitea `contenido` en `path_repo` del repo de GitHub (API de contenidos).
+
+    Requiere un token con permiso de escritura sobre `repo` (fine-grained
+    "Contents: Read and write" o classic con scope `repo`). Devuelve
+    (ok, mensaje_error) — mensaje_error es "" si ok.
+    """
+    api_url = f"https://api.github.com/repos/{repo}/contents/{path_repo}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        resp_get = requests.get(api_url, headers=headers, params={"ref": branch}, timeout=15)
+        sha_actual = resp_get.json().get("sha") if resp_get.status_code == 200 else None
+
+        payload = {
+            "message": mensaje,
+            "content": base64.b64encode(contenido).decode("ascii"),
+            "branch": branch,
+        }
+        if sha_actual:
+            payload["sha"] = sha_actual
+
+        resp_put = requests.put(api_url, headers=headers, json=payload, timeout=30)
+    except requests.RequestException as e:
+        logger.warning("Error de red al commitear %s a GitHub: %s", path_repo, e)
+        return False, f"No se pudo conectar con GitHub: {e}"
+
+    if resp_put.status_code in (200, 201):
+        logger.info("Commit a GitHub OK: %s (%s)", path_repo, repo)
+        return True, ""
+
+    try:
+        detalle = resp_put.json().get("message", resp_put.text)
+    except ValueError:
+        detalle = resp_put.text
+    logger.warning(
+        "Commit a GitHub falló (%s) para %s: %s", resp_put.status_code, path_repo, detalle
+    )
+    return False, f"GitHub respondió {resp_put.status_code}: {detalle}"
 
 
 def cargar_datos_plantilla(

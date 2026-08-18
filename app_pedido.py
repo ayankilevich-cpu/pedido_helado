@@ -8,6 +8,8 @@ Deploy en Streamlit Cloud:
     Subir repo a GitHub y conectar desde share.streamlit.io
 """
 
+import logging
+
 import numpy as np
 import streamlit as st
 import streamlit.components.v1 as st_components
@@ -17,6 +19,7 @@ from io import BytesIO
 from pathlib import Path
 
 from pedido_logic import (
+    ArchivoInvalidoError,
     cargar_cajas_terminadas,
     cargar_mixventas,
     cargar_stock,
@@ -27,6 +30,7 @@ from pedido_logic import (
     escribir_carrito,
     obtener_plantilla,
     _guardar_plantilla,
+    actualizar_archivo_en_github,
     validar_plantilla_carrito,
     cargar_planificacion,
     _guardar_planificacion,
@@ -43,7 +47,39 @@ from pedido_logic import (
     AJUSTE_SIN_PLAN,
 )
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 st.set_page_config(page_title="Pedido Semanal Grido", page_icon="🍦", layout="wide")
+
+
+def _password_gate() -> None:
+    """Gate simple por contraseña — solo se activa si hay APP_PASSWORD en secrets.
+
+    Sin ese secret configurado (típico en desarrollo local), la app arranca
+    directo sin pedir login.
+    """
+    try:
+        esperado = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        esperado = None
+    if not esperado:
+        return
+    if st.session_state.get("auth_ok"):
+        return
+
+    st.title("🍦 Pedido Semanal Grido")
+    pw = st.text_input("Contraseña", type="password")
+    if pw:
+        if pw == esperado:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta")
+    st.stop()
+
+
+_password_gate()
 
 
 def _pedido_numpy_desde_editor(
@@ -95,6 +131,26 @@ def _cargar_mapeo_ui() -> pd.DataFrame | None:
     return cargar_mapeo_disco()
 
 
+@st.cache_data(show_spinner=False)
+def _cargar_datos_plantilla_disco(path_str: str, mtime: float):
+    """Cacheado por (ruta, mtime): la plantilla se relee hasta 4 veces por
+    sesión (preview de sidebar, cálculo, refresco de resultados, backfill de
+    peso_unit); cachear evita releer el mismo .xlsx de ~410 filas de más.
+    `mtime` en la key invalida el cache automáticamente cuando el archivo se
+    reemplaza en disco (commit nuevo, subida por UI), sin depender del nombre.
+    """
+    return cargar_datos_plantilla(path_str)
+
+
+def _cargar_datos_plantilla_ui(fuente):
+    """Resuelve datos de plantilla usando cache cuando la fuente es un Path en
+    disco; sin cache para el fallback en memoria (BytesIO), caso raro que solo
+    ocurre si el guardado a disco falló."""
+    if isinstance(fuente, Path):
+        return _cargar_datos_plantilla_disco(str(fuente), fuente.stat().st_mtime)
+    return cargar_datos_plantilla(fuente)
+
+
 # ── Sidebar: plantilla del carrito ────────────────────────────────────────────
 
 with st.sidebar:
@@ -109,7 +165,7 @@ with st.sidebar:
     plantilla_actual = obtener_plantilla()
     if plantilla_actual:
         try:
-            _cub_p, _pre_p, _peso_p = cargar_datos_plantilla(plantilla_actual)
+            _cub_p, _pre_p, _peso_p = _cargar_datos_plantilla_ui(plantilla_actual)
             _n_prod = len(_cub_p)
             _mtime = plantilla_actual.stat().st_mtime
             _fecha = pd.Timestamp(_mtime, unit="s").strftime("%d/%m/%Y %H:%M")
@@ -177,17 +233,64 @@ with st.sidebar:
             if not ok:
                 st.error(err)
             else:
-                contenido = _guardar_plantilla(nueva_plantilla)
+                contenido, guardado_disco = _guardar_plantilla(nueva_plantilla)
                 if contenido:
                     st.session_state["plantilla_bytes"] = contenido
                     st.session_state["plantilla_version"] = (
                         st.session_state.get("plantilla_version", 0) + 1
                     )
                 st.session_state["_plantilla_file_sig"] = sig
-                st.success(
-                    "Plantilla actualizada (precios y datos del carrito). "
-                    "Podés calcular el pedido cuando quieras."
-                )
+
+                if not guardado_disco:
+                    st.warning(
+                        "Plantilla actualizada solo para esta sesión — no se pudo "
+                        "escribir en disco. Volvé a subirla la próxima vez que entres."
+                    )
+                else:
+                    # Filesystem de Streamlit Cloud es efímero: lo guardado en disco
+                    # no sobrevive a un reinicio del contenedor (ver AGENTS.md §7).
+                    # Si hay un token de GitHub configurado, commiteamos la plantilla
+                    # al repo para que quede persistida de verdad — mismo efecto que
+                    # el procedimiento manual "commit + push + reboot" de AGENTS.md §11.
+                    try:
+                        github_token = st.secrets.get("GITHUB_TOKEN")
+                    except Exception:
+                        github_token = None
+
+                    if github_token and contenido:
+                        with st.spinner("Guardando la plantilla en el repo (para que persista)..."):
+                            ok_gh, err_gh = actualizar_archivo_en_github(
+                                contenido,
+                                token=github_token,
+                                mensaje=f"chore: actualizar plantilla del carrito ({nueva_plantilla.name})",
+                            )
+                        if ok_gh:
+                            st.success(
+                                "Plantilla actualizada y guardada de forma permanente "
+                                "(commiteada al repo). La app puede reiniciarse sola en "
+                                "unos segundos por el nuevo commit — es esperado."
+                            )
+                        else:
+                            logger.warning("No se pudo commitear la plantilla a GitHub: %s", err_gh)
+                            st.warning(
+                                "Plantilla actualizada para esta sesión, pero no se pudo "
+                                f"guardar de forma permanente en GitHub ({err_gh}). "
+                                "Si se reinicia la app, va a volver a la plantilla anterior — "
+                                "conviene subir el archivo al repo manualmente (ver AGENTS.md §11)."
+                            )
+                    else:
+                        st.success(
+                            "Plantilla actualizada (precios y datos del carrito). "
+                            "Podés calcular el pedido cuando quieras."
+                        )
+                        st.caption(
+                            "⚠️ Esto persiste solo mientras la app siga corriendo sin "
+                            "reiniciarse — Streamlit Cloud puede reiniciar el contenedor "
+                            "(inactividad, redeploy) y volver a la plantilla anterior. "
+                            "Para que quede guardado para siempre, configurá el secret "
+                            "`GITHUB_TOKEN` en la app (ver AGENTS.md §7) o subí el archivo "
+                            "al repo manualmente."
+                        )
 
     st.divider()
     st.subheader("Mapeo de productos")
@@ -266,13 +369,18 @@ with st.sidebar:
                         "El CSV no tiene columnas `Semana_<n>_<Mes>_<Año>` reconocibles."
                     )
                 else:
-                    _guardar_planificacion(plan_upload)
+                    _, guardado_disco = _guardar_planificacion(plan_upload)
                     st.session_state["plan_df"] = plan_preview
                     st.session_state["_plan_file_sig"] = sig
                     st.success(
                         f"Planificación actualizada: {len(plan_preview)} productos · "
                         f"{n_semanas} semanas. Podés calcular el pedido cuando quieras."
                     )
+                    if not guardado_disco:
+                        st.caption(
+                            "⚠️ No se pudo guardar en disco — esto persiste solo "
+                            "para esta sesión."
+                        )
             except Exception as e:
                 st.error(f"No se pudo leer el CSV: {e}")
 
@@ -442,46 +550,57 @@ with col_btn:
     )
 
 if btn_calcular:
-    with st.spinner("Procesando archivos..."):
-        ventas_granel = cargar_cajas_terminadas(file_cajas)
-        ventas_empaq = cargar_mixventas(file_mix)
-        ventas = pd.concat([ventas_granel, ventas_empaq], ignore_index=True)
+    try:
+        with st.spinner("Procesando archivos..."):
+            ventas_granel = cargar_cajas_terminadas(file_cajas)
+            ventas_empaq = cargar_mixventas(file_mix)
+            ventas = pd.concat([ventas_granel, ventas_empaq], ignore_index=True)
 
-        st.session_state["ventas_info"] = (
-            f"Ventas cargadas: {len(ventas_granel)} sabores granel + "
-            f"{len(ventas_empaq)} productos empaquetados"
+            st.session_state["ventas_info"] = (
+                f"Ventas cargadas: {len(ventas_granel)} sabores granel + "
+                f"{len(ventas_empaq)} productos empaquetados"
+            )
+
+            stock_df = cargar_stock(file_stock)
+            mapeo = generar_mapeo(ventas, stock_df)
+            st.session_state["mapeo_df"] = mapeo
+
+            sin_mapeo = mapeo[mapeo["descripcion_carrito"] == "SIN MAPEO"]
+            st.session_state["sin_mapeo_df"] = sin_mapeo
+
+            pedido_df = calcular_pedido(
+                ventas, mapeo, stock_df,
+                pct_stock_seg=pct_stock_seg,
+                pct_ajuste_venta=pct_ajuste_venta,
+                plan_df=plan_df,
+                plan_col=semana_sel,
+                modo_replicar_venta=modo_replicar_venta,
+            )
+
+        plantilla = _resolver_plantilla()
+        cubicaje_dict, precio_dict, peso_dict = _cargar_datos_plantilla_ui(plantilla)
+        pedido_df["cubicaje_unit"] = pedido_df["codigo_carrito"].map(cubicaje_dict).fillna(0)
+        pedido_df["precio_unit"] = pedido_df["codigo_carrito"].map(precio_dict).fillna(0)
+        pedido_df["peso_unit"] = pedido_df["codigo_carrito"].map(peso_dict).fillna(0)
+
+        st.session_state["pedido_base"] = pedido_df
+        st.session_state["pedido_params"] = {
+            "pct_stock_seg": pct_stock_seg,
+            "pct_ajuste_venta": pct_ajuste_venta,
+            "semana_sel": semana_sel,
+            "modo_replicar_venta": modo_replicar_venta,
+        }
+        st.session_state["calc_version"] = st.session_state.get("calc_version", 0) + 1
+    except ArchivoInvalidoError as e:
+        logger.warning("Archivo inválido al calcular el pedido: %s", e)
+        st.error(str(e))
+    except Exception as e:
+        logger.exception("Error inesperado al calcular el pedido")
+        st.error(
+            "Ocurrió un error inesperado al procesar los archivos. Verificá que "
+            "sean los archivos correctos para cada cuadro (Cajas Terminadas, Mix "
+            f"Ventas, Stock) y volvé a intentar.  \nDetalle técnico: {e}"
         )
-
-        stock_df = cargar_stock(file_stock)
-        mapeo = generar_mapeo(ventas, stock_df)
-        st.session_state["mapeo_df"] = mapeo
-
-        sin_mapeo = mapeo[mapeo["descripcion_carrito"] == "SIN MAPEO"]
-        st.session_state["sin_mapeo_df"] = sin_mapeo
-
-        pedido_df = calcular_pedido(
-            ventas, mapeo, stock_df,
-            pct_stock_seg=pct_stock_seg,
-            pct_ajuste_venta=pct_ajuste_venta,
-            plan_df=plan_df,
-            plan_col=semana_sel,
-            modo_replicar_venta=modo_replicar_venta,
-        )
-
-    plantilla = _resolver_plantilla()
-    cubicaje_dict, precio_dict, peso_dict = cargar_datos_plantilla(plantilla)
-    pedido_df["cubicaje_unit"] = pedido_df["codigo_carrito"].map(cubicaje_dict).fillna(0)
-    pedido_df["precio_unit"] = pedido_df["codigo_carrito"].map(precio_dict).fillna(0)
-    pedido_df["peso_unit"] = pedido_df["codigo_carrito"].map(peso_dict).fillna(0)
-
-    st.session_state["pedido_base"] = pedido_df
-    st.session_state["pedido_params"] = {
-        "pct_stock_seg": pct_stock_seg,
-        "pct_ajuste_venta": pct_ajuste_venta,
-        "semana_sel": semana_sel,
-        "modo_replicar_venta": modo_replicar_venta,
-    }
-    st.session_state["calc_version"] = st.session_state.get("calc_version", 0) + 1
 
 # ── Resultados (persisten y se actualizan al editar) ─────────────────────────
 
@@ -492,7 +611,7 @@ if "pedido_base" in st.session_state:
     # Precios/cubicaje/peso siempre desde la plantilla actual (nueva subida en sidebar)
     plantilla_viva = _resolver_plantilla()
     if plantilla_viva:
-        cubicaje_dict, precio_dict, peso_dict = cargar_datos_plantilla(plantilla_viva)
+        cubicaje_dict, precio_dict, peso_dict = _cargar_datos_plantilla_ui(plantilla_viva)
         pb = st.session_state["pedido_base"].copy()
         pb["cubicaje_unit"] = pb["codigo_carrito"].map(cubicaje_dict).fillna(0)
         pb["precio_unit"] = pb["codigo_carrito"].map(precio_dict).fillna(0)
@@ -519,7 +638,7 @@ if "pedido_base" in st.session_state:
     if "peso_unit" not in pedido_df.columns:
         plantilla = _resolver_plantilla()
         if plantilla:
-            _, _, peso_dict = cargar_datos_plantilla(plantilla)
+            _, _, peso_dict = _cargar_datos_plantilla_ui(plantilla)
             pedido_df["peso_unit"] = pedido_df["codigo_carrito"].map(peso_dict).fillna(0)
         else:
             pedido_df["peso_unit"] = 0.0
